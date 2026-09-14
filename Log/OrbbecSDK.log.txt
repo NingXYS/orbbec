@@ -1,0 +1,62 @@
+[09/12 18:30:27.500754][info][27413][HostTimestampProvider.cpp:36] Update clock type to: realtime(0)
+[09/12 18:30:27.578640][info][27413][LinuxUsbPal.cpp:334] Create PollingDeviceWatcher!
+[09/12 18:30:27.578652][info][27413][DeviceManager.cpp:25] Current found device(s): (1)
+[09/12 18:30:27.578654][info][27413][DeviceManager.cpp:34] 	- Name: Gemini 336L, PID: 0x0807, SN/ID: CP828410009M, Connection: USB3.2
+[09/12 18:30:27.578656][info][27413][DeviceManager.cpp:463] Enable net device enumeration: true
+[09/12 18:30:28.581984][info][27413][DeviceManager.cpp:25] Current device(s) list: (1)
+[09/12 18:30:28.582002][info][27413][DeviceManager.cpp:34] 	- Name: Gemini 336L, PID: 0x0807, SN/ID: CP828410009M, Connection: USB3.2
+[09/12 18:30:28.584028][info][27413][G330Device.cpp:630] UVCAutoRebootOnFault=true for device: Gemini 336L
+[09/12 18:30:28.584842][info][27413][DeviceBase.cpp:742] key: HwType,value:L2
+[09/12 18:30:28.584845][info][27413][DeviceBase.cpp:742] key: HwVer,value:V1.1
+[09/12 18:30:28.584846][info][27413][DeviceBase.cpp:742] key: IspFwVer,value:20240926
+[09/12 18:30:28.584846][info][27413][DeviceBase.cpp:742] key: IspNeedVer,value:20240926
+[09/12 18:30:28.741123][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 205
+[09/12 18:30:28.741146][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 204
+[09/12 18:30:28.741151][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 211
+[09/12 18:30:28.741153][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 212
+[09/12 18:30:28.741155][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 5525
+[09/12 18:30:28.741158][warning][27413][PropertyServer.cpp:55] [CP828410009M] Property not found to register callback, propertyId: 277
+[09/12 18:30:28.741255][warning][27413][PropertyConfigHandler.hpp:53] Unsupported property '223', skipping getting, return nullvalue
+[09/12 18:30:28.741530][warning][27413][ObException.cpp:32] A unrecoverable_exception has occurred!
+ - where: Protocol.cpp(39)
+ - msg: Request failed, device response with error, errorCode: 2, msg: , propertyId: 2052
+ - type: IO
+ - status: 1005
+[09/12 18:30:28.741585][warning][27413][G330PresetManager.cpp:98] Execute failure! A libobsensor_exception has occurred!
+ - where: G330PresetManager.cpp(98):G330PresetManager
+ - msg: Request failed, device response with error, errorCode: 2, msg: , propertyId: 2052
+ - type: N11libobsensor23unrecoverable_exceptionE
+ - status: 1005
+[09/12 18:30:28.741591][info][27413][DeviceManager.cpp:200] Device created successfully! Name: Gemini 336L, PID: 0x0807, SN/ID: CP828410009M FW: 1.3.70
+[09/12 18:30:28.741634][info][27413][Pipeline.cpp:54] [CP828410009M] Pipeline created with device: {name: Gemini 336L, sn: CP828410009M}, @0x559BD9FA15F0
+[09/12 18:30:29.033614][info][27413][Pipeline.cpp:228] [CP828410009M] Check and set config done!
+[09/12 18:30:29.033972][info][27413][Pipeline.cpp:266] [CP828410009M] Try to start streams!
+[09/12 18:30:29.033982][info][27413][VideoSensor.cpp:61] [CP828410009M] Try to start stream: {type: Depth, format: Y16, width: 640, height: 480, fps: 30}
+[09/12 18:30:29.033991][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STOPPED to STARTING@Depth
+[09/12 18:30:29.033996][info][27413][VideoSensor.cpp:130] [CP828410009M] Start backend stream: {type: Depth, format: Z16, width: 640, height: 480, fps: 30}
+[09/12 18:30:29.035220][info][27413][VideoSensor.cpp:61] [CP828410009M] Try to start stream: {type: Color, format: RGB, width: 640, height: 480, fps: 30}
+[09/12 18:30:29.035225][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STOPPED to STARTING@Color
+[09/12 18:30:29.035229][info][27413][VideoSensor.cpp:130] [CP828410009M] Start backend stream: {type: Color, format: YUYV, width: 640, height: 480, fps: 30}
+[09/12 18:30:29.036774][info][27413][Pipeline.cpp:293] [CP828410009M] Start streams done!
+[09/12 18:30:29.036777][info][27413][Pipeline.cpp:250] [CP828410009M] Pipeline start done!
+[09/12 18:30:29.304842][info][27488][SensorBase.cpp:216] [CP828410009M] Stream state changed from STARTING to STREAMING@Depth
+[09/12 18:30:29.536885][warning][27413][Pipeline.cpp:335] [CP828410009M] Wait for frame timeout, you can try to increase the wait time! current timeout=500
+[09/12 18:30:29.885317][info][27490][SensorBase.cpp:216] [CP828410009M] Stream state changed from STARTING to STREAMING@Color
+[09/12 18:30:29.887007][warning][27495][Pipeline.cpp:324] [CP828410009M] Output frameset queue is full, drop oldest frameset!
+[09/12 18:30:30.058858][info][27413][Pipeline.cpp:367] [CP828410009M] Try to stop pipeline!
+[09/12 18:30:30.058870][info][27413][Pipeline.cpp:343] [CP828410009M] Try to stop streams!
+[09/12 18:30:30.058884][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STREAMING to STOPPING@Color
+[09/12 18:30:30.068279][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STOPPING to STOPPED@Color
+[09/12 18:30:30.068411][info][27413][Pipeline.cpp:357] [CP828410009M] Sensor stream stopped, sensorType=Color
+[09/12 18:30:30.068418][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STREAMING to STOPPING@Depth
+[09/12 18:30:30.088399][info][27413][SensorBase.cpp:216] [CP828410009M] Stream state changed from STOPPING to STOPPED@Depth
+[09/12 18:30:30.088557][info][27413][Pipeline.cpp:357] [CP828410009M] Sensor stream stopped, sensorType=Depth
+[09/12 18:30:30.088559][info][27413][Pipeline.cpp:363] [CP828410009M] Stop streams done!
+[09/12 18:30:30.128383][info][27413][Pipeline.cpp:393] [CP828410009M] Stop pipeline done!
+[09/12 18:30:30.436057][info][27413][Pipeline.cpp:65] [CP828410009M] Pipeline destroyed! @0x559BD9FA15F0
+[09/12 18:30:30.436190][info][27413][SensorBase.cpp:53] [CP828410009M] SensorBase is destroyed
+[09/12 18:30:30.437110][info][27413][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[09/12 18:30:30.437113][info][27413][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done
+[09/12 18:30:30.437169][info][27413][SensorBase.cpp:53] [CP828410009M] SensorBase is destroyed
+[09/12 18:30:30.438719][info][27413][ObLibuvcDevicePort.cpp:87] uvc_close done.
+[09/12 18:30:30.438721][info][27413][ObLibuvcDevicePort.cpp:88] ~ObLibuvcDevicePort done

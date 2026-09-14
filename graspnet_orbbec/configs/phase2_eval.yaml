@@ -1,0 +1,48 @@
+# 阶段二整体验收矩阵。点名成功率只统计 cases；abnormal 单独记。
+iou_threshold: 0.5
+repeats: 10
+
+# 准确名称 × 3 物体 × 10 次（336L 对齐桌面图）
+exact:
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 机械键盘
+    bbox_2d: [548, 505, 870, 655]
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 黑色杯子
+    bbox_2d: [475, 392, 550, 545]
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 白色鼠标
+    bbox_2d: [720, 620, 980, 800]
+
+# 口语描述 × 3（同一 GT）
+colloquial:
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 红白相间的键盘
+    bbox_2d: [548, 505, 870, 655]
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 黑色保温杯
+    bbox_2d: [475, 392, 550, 545]
+  - image: vlm/testdata/04_desk.png
+    frame: vlm/locator_data/desk
+    target: 桌上那个白色鼠标
+    bbox_2d: [720, 620, 980, 800]
+
+# 不存在目标 × 3
+absent:
+  - image: vlm/testdata/04_desk.png
+    target: 香蕉
+  - image: vlm/testdata/04_desk.png
+    target: 电钻
+  - image: vlm/testdata/04_desk.png
+    target: 西瓜
+
+# 空场景：天花板对齐帧，图中无桌面目标
+empty_scene:
+  image: output/capture/20260912_184352/color.png
+  frame: output/capture/20260912_184352
+  target: 白色鼠标

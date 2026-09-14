@@ -1,0 +1,27 @@
+# 离线 3D 定位验收：对齐 RGB-D 帧 + 任务 3 测过的成功 bbox。
+# 帧是 Gemini 336L 保存的 color/depth/intrinsics，与 testdata/04、05 为同一画面。
+cases:
+  - frame: vlm/locator_data/desk
+    target: 机械键盘
+    bbox_2d: [550, 513, 864, 651]
+    expect_ok: true
+  - frame: vlm/locator_data/desk
+    target: 黑色杯子
+    bbox_2d: [479, 398, 544, 538]
+    expect_ok: true
+  - frame: vlm/locator_data/desk
+    target: 白色鼠标
+    bbox_2d: [780, 650, 1000, 800]
+    expect_ok: true
+  - frame: vlm/locator_data/desk2
+    target: 白色鼠标
+    bbox_2d: [780, 659, 1000, 799]
+    expect_ok: true
+  - frame: vlm/locator_data/desk
+    target: 塑料杯
+    bbox_2d: [400, 428, 468, 532]
+    expect_ok: true
+  - frame: vlm/locator_data/desk
+    target: 空洞区
+    bbox_2d: [0, 720, 80, 800]
+    expect_ok: false

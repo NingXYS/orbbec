@@ -1,0 +1,17 @@
+# 运行时 Python 依赖（不含 PyTorch，由 setup_env.sh 按 CUDA 轮子单独安装）
+numpy==1.26.4
+opencv-python==4.10.0.84
+open3d==0.19.0
+PyYAML>=6.0
+Pillow>=9.0
+tqdm>=4.64
+scipy>=1.10
+matplotlib>=3.7
+gdown>=5.0
+transforms3d>=0.4
+trimesh>=4.0
+# pyorbbecsdk 不要用 PyPI 轮子（1.3.2 manylinux 包实际是 macOS）。
+# 由 scripts/build_pyorbbecsdk.sh 从 third_party/pyorbbecsdk-v1 编译。
+pytest>=7.0
+openai>=1.40
+

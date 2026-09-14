@@ -1,0 +1,14 @@
+# 本文件配合 scripts/setup_env.sh 使用。
+# 环境安装到项目内 .conda/，不要装到 miniconda3/envs。
+#
+#   bash scripts/setup_env.sh
+#   source scripts/activate.sh
+name: graspnet_orbbec
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+      - -r requirements.txt

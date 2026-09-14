@@ -1,0 +1,62 @@
+# 只用 vlm/testdata 冻结的 5 张图。路径必须在该目录内，禁止指向 output/ 或官方 example。
+# bbox 为原图像素 [x1,y1,x2,y2]，按物体紧框标注。
+cases:
+  - image: vlm/testdata/01_floor.png
+    target: 蓝色湿巾包
+    found: true
+    bbox_2d: [158, 145, 258, 275]
+  - image: vlm/testdata/01_floor.png
+    target: 黄色小方块
+    found: true
+    bbox_2d: [150, 62, 210, 118]
+  - image: vlm/testdata/01_floor.png
+    target: 香蕉
+    found: false
+
+  - image: vlm/testdata/02_mouse.png
+    target: 白色鼠标
+    found: true
+    bbox_2d: [0, 245, 350, 468]
+  - image: vlm/testdata/02_mouse.png
+    target: 白色杯子
+    found: true
+    bbox_2d: [304, 200, 395, 320]
+  - image: vlm/testdata/02_mouse.png
+    target: 电钻
+    found: false
+
+  - image: vlm/testdata/03_laptop.png
+    target: 笔记本电脑
+    found: true
+    bbox_2d: [0, 20, 500, 370]
+  - image: vlm/testdata/03_laptop.png
+    target: 白色鼠标
+    found: true
+    bbox_2d: [345, 248, 620, 448]
+  - image: vlm/testdata/03_laptop.png
+    target: 香蕉
+    found: false
+
+  - image: vlm/testdata/04_desk.png
+    target: 机械键盘
+    found: true
+    bbox_2d: [548, 505, 870, 655]
+  - image: vlm/testdata/04_desk.png
+    target: 黑色杯子
+    found: true
+    bbox_2d: [475, 392, 550, 545]
+  - image: vlm/testdata/04_desk.png
+    target: 香蕉
+    found: false
+
+  - image: vlm/testdata/05_desk2.png
+    target: 电脑显示器
+    found: true
+    bbox_2d: [575, 5, 1200, 555]
+  - image: vlm/testdata/05_desk2.png
+    target: 白色鼠标
+    found: true
+    bbox_2d: [720, 620, 980, 800]
+  - image: vlm/testdata/05_desk2.png
+    target: 香蕉
+    found: false
