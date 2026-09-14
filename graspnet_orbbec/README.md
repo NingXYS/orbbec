@@ -65,3 +65,6 @@ Astra Pro Plus **不在** OrbbecSDK_ROS2 v2 支持列表。本仓库使用 **PyO
 - [docs/phase2_report.md](docs/phase2_report.md) 阶段二整体验收（336L 点名闭环，进臂前）
 - [docs/controller_recon.md](docs/controller_recon.md) 厂家控制器（Jetson Thor）只读侦察
 - [docs/cross_host_ros.md](docs/cross_host_ros.md) 笔记本 Humble ↔ 控制器 Jazzy 跨机连通实测
+- [docs/moveit_safe_exec.md](docs/moveit_safe_exec.md) MoveIt 双位姿安全执行步骤
+- [docs/MoveIt双位姿验证记录_20260914.md](docs/MoveIt双位姿验证记录_20260914.md) 2026-09-14 真机双位姿验收记录
+- [docs/task3_closeout.md](docs/task3_closeout.md) 任务 3 结项（MoveIt 首次程序下发）
