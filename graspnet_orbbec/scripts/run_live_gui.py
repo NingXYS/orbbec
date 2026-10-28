@@ -59,7 +59,18 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rgb-k", type=int, default=8, help="RGB 上只画前 k 个，避免框叠成一团")
     p.add_argument("--no-o3d", action="store_true", help="只要 OpenCV 窗口，不要旁路 3D")
     p.add_argument("--no-target", action="store_true", help="关掉点名通道，行为与旧 GUI 相同")
-    return p.parse_args()
+    p.add_argument("--wire", action="store_true", help="SAM2线材识别模式：像素掩码和二维端部候选")
+    p.add_argument("--wire-auto", action="store_true", help="启动后自动取一帧，本地识别线材和端子，无需框选")
+    p.add_argument("--wire-box", nargs=4, type=int, help="识别模式初始提示框，原图像素xyxy")
+    p.add_argument("--wire-point", nargs=2, type=int, action="append", default=[], help="识别模式初始前景点，可重复")
+    p.add_argument("--wire-seconds", type=float, default=0, help="识别窗口定时退出；0为手动退出")
+    p.add_argument("--wire-preview", help="将首次识别结果的窗口画布保存为PNG")
+    args = p.parse_args()
+    if args.wire_auto:
+        args.wire = True
+        if args.wire_box is not None or args.wire_point:
+            p.error('--wire-auto 不与初始手工框/点提示同时使用')
+    return args
 
 
 class InferWorker(threading.Thread):
@@ -84,6 +95,11 @@ class InferWorker(threading.Thread):
         with self._lock:
             self._frame = frame
             self._pending = True
+
+    def stop(self) -> None:
+        """等待当前推理完成，避免解释器退出时仍有 CUDA/C++ 工作线程。"""
+        self.stop_flag = True
+        self.join()
 
     def run(self) -> None:
         while not self.stop_flag:
@@ -118,16 +134,18 @@ class InputChannel:
     def start_stdin(self) -> None:
         if not sys.stdin.isatty():
             return
+        try:
+            import readline  # noqa: F401  让 input 支持终端行编辑和方向键。
+        except ImportError:
+            pass
         self._th = threading.Thread(target=self._reader, name="stdin-target", daemon=True)
         self._th.start()
 
     def _reader(self) -> None:
         while not self.stop_flag:
             try:
-                line = sys.stdin.readline()
-            except Exception:
-                break
-            if line == "":
+                line = input()
+            except (EOFError, OSError):
                 break
             self.push(line)
 
@@ -152,6 +170,8 @@ class LiveCloudView:
         self.pcd = None
         self.grippers = []
         self._inited_bbox = False
+        self._last_cloud = None
+        self._last_grasps = None
         if not enabled:
             return
         try:
@@ -164,7 +184,6 @@ class LiveCloudView:
                 self.enabled = False
                 return
             pcd = o3d.geometry.PointCloud()
-            vis.add_geometry(pcd)
             opt = vis.get_render_option()
             opt.background_color = np.array([1, 1, 1])
             opt.point_size = 3.5
@@ -179,21 +198,28 @@ class LiveCloudView:
         if not self.enabled or self.vis is None:
             return True
         try:
-            if pcd is not None and np.asarray(pcd.points).size:
+            if pcd is not None and pcd is not self._last_cloud and np.asarray(pcd.points).size:
                 self.pcd.points = pcd.points
                 self.pcd.colors = pcd.colors
-                self.vis.update_geometry(self.pcd)
                 if not self._inited_bbox:
+                    # 第一帧有真实点云后再建包围盒，避免对空点云发警告。
+                    self.vis.add_geometry(self.pcd)
                     self.vis.reset_view_point(True)
                     self._inited_bbox = True
-            for g in self.grippers:
-                self.vis.remove_geometry(g, reset_bounding_box=False)
-            self.grippers = []
-            if gg is not None and len(gg) > 0:
-                show = gg[: min(int(top_k), len(gg))]
-                for mesh in show.to_open3d_geometry_list():
-                    self.vis.add_geometry(mesh, reset_bounding_box=False)
-                    self.grippers.append(mesh)
+                else:
+                    self.vis.update_geometry(self.pcd)
+                self._last_cloud = pcd
+            # 推理结果比相机帧更新慢，只在结果变化时重建夹爪网格。
+            if gg is not self._last_grasps:
+                for g in self.grippers:
+                    self.vis.remove_geometry(g, reset_bounding_box=False)
+                self.grippers = []
+                if gg is not None and len(gg) > 0:
+                    show = gg[: min(int(top_k), len(gg))]
+                    for mesh in show.to_open3d_geometry_list():
+                        self.vis.add_geometry(mesh, reset_bounding_box=False)
+                        self.grippers.append(mesh)
+                self._last_grasps = gg
             if not self.vis.poll_events():
                 return False
             self.vis.update_renderer()
@@ -239,13 +265,21 @@ def main() -> int:
     data_dir = args.from_dir
     if args.official_demo:
         data_dir = str(GRASPNET_ROOT / "doc" / "example_data")
+    if args.wire:
+        from segmentation.wire_gui import run
+        args.from_dir = data_dir
+        return run(cfg, args, InputChannel())
     if data_dir:
         cam = FileCamera(data_dir, loop=True)
     else:
         cam = open_camera(cfg)
     print("正在打开相机并加载 GraspNet，请稍候…")
     cam.open()
-    engine = GraspNetInfer(cfg, checkpoint=args.checkpoint)
+    try:
+        engine = GraspNetInfer(cfg, checkpoint=args.checkpoint)
+    except BaseException:
+        cam.close()
+        raise
     worker = InferWorker(engine)
     worker.start()
     view3d = LiveCloudView(enabled=not args.no_o3d)
@@ -279,8 +313,8 @@ def main() -> int:
     last_n = 0
     last_score = 0.0
     cached: QueryResult | None = None
-    status_msg = "等待输入目标词（终端回车）"
-    print("界面已打开。把物体放到桌面中央，336L 建议相距约 0.5 m。")
+    status_msg = "抓取识别中（点名已关闭）" if args.no_target else "等待输入目标词（终端回车）"
+    print("界面已打开。把物体放到桌面中央，初次测试建议相距约 0.5～1 m。")
     if not args.no_target:
         print("在此终端输入目标词后回车，例如：白色鼠标   （c 清除，q 退出）")
     try:
@@ -385,14 +419,14 @@ def main() -> int:
             if qworker is not None and qworker.busy:
                 status = "VLM"
             z_mm = float(frame.depth_m[frame.depth_m > 0].mean() * 1000) if np.any(frame.depth_m > 0) else 0.0
-            _hud(
-                rgb_g,
-                [
-                    f"cam {cam_fps:.1f} FPS  infer {worker.infer_ms:.0f} ms  [{status}]",
-                    f"grasps {last_n}  top {last_score:.2f}  depth {valid*100:.0f}%  z~{z_mm:.0f}mm",
-                    "q quit | space pause | s save | 3 Open3D | type target in terminal",
-                ],
-            )
+            hud_lines = [
+                f"cam {cam_fps:.1f} FPS  infer {worker.infer_ms:.0f} ms  [{status}]",
+                f"grasps {last_n}  top {last_score:.2f}  depth {valid*100:.0f}%  z~{z_mm:.0f}mm",
+                "q quit | space pause | s save | 3 Open3D | type target in terminal",
+            ]
+            if frame.backend == "dabai_dc1":
+                hud_lines.append("DaBai DC1 | RGB-D unsynced | keep scene stationary")
+            _hud(rgb_g, hud_lines)
             put_cjk(rgb_g, status_msg, (12, rgb_g.shape[0] - 18), (0, 255, 255) if cached else (0, 0, 255) if (qworker and qworker.error) else (0, 255, 0), 20)
             if worker.error:
                 cv2.putText(rgb_g, worker.error[:80], (12, rgb_g.shape[0] - 42), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 1)
@@ -423,6 +457,8 @@ def main() -> int:
             if key == ord("3"):
                 if last_pcd is not None:
                     _open_blocking_3d(last_pcd, last_gg)
+    except KeyboardInterrupt:
+        pass
     finally:
         worker.stop_flag = True
         if qworker is not None:
@@ -431,6 +467,7 @@ def main() -> int:
         view3d.close()
         cv2.destroyAllWindows()
         cam.close()
+        worker.stop()
     return 0
 
 

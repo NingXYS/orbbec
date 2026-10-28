@@ -1,4 +1,4 @@
-"""百炼 OpenAI 兼容接口上的 Qwen3-VL 检测客户端。
+"""百炼 OpenAI 兼容接口上的视觉模型检测客户端。
 
 只从环境变量 DASHSCOPE_API_KEY 读密钥；日志与异常里做脱敏。
 不接实时采集循环。
@@ -40,6 +40,10 @@ class _RedactFilter(logging.Filter):
         if record.args:
             record.args = tuple(redact_secrets(a) if isinstance(a, str) else a for a in record.args)
         return True
+
+
+class VLMConfigurationError(RuntimeError):
+    """模型、鉴权或请求配置错误；重复提交同一请求无法恢复。"""
 
 
 if not any(isinstance(f, _RedactFilter) for f in LOGGER.filters):
@@ -206,7 +210,7 @@ class VLMDetectResult:
 
 
 class VLMClient:
-    """qwen3-vl-flash 检测客户端。prompt / 模型名全部来自配置。"""
+    """视觉检测客户端。prompt / 模型名全部来自配置。"""
 
     def __init__(self, cfg: Optional[Config] = None):
         self.cfg = cfg or load_config()
@@ -215,10 +219,14 @@ class VLMClient:
             raise RuntimeError("未设置环境变量 DASHSCOPE_API_KEY")
         self._api_key = key
         self.base_url = str(self.cfg.get_path("vlm.base_url", "https://dashscope.aliyuncs.com/compatible-mode/v1"))
-        self.model = str(self.cfg.get_path("vlm.model", "qwen3-vl-flash-2026-01-22"))
+        self.model = str(self.cfg.get_path("vlm.model", "qwen3.6-flash-2026-04-16"))
         self.timeout_s = float(self.cfg.get_path("vlm.timeout_s", 5.0))
         self.max_retries = int(self.cfg.get_path("vlm.max_retries", 2))
         self._client = None
+
+    def _redact(self, text: str) -> str:
+        # 密钥不一定使用 sk- 前缀，额外匹配本次实际使用的凭据。
+        return redact_secrets(text.replace(self._api_key, "***"))
 
     def _openai(self):
         if self._client is None:
@@ -230,6 +238,7 @@ class VLMClient:
                 api_key=self._api_key,
                 base_url=self.base_url,
                 timeout=self.timeout_s,
+                max_retries=0,  # 重试次数和总超时由 detect 统一控制。
             )
         return self._client
 
@@ -331,12 +340,18 @@ class VLMClient:
                     "vlm 调用失败 attempt=%d/%d: %s",
                     used + 1,
                     attempts,
-                    redact_secrets(f"{type(e).__name__}: {e}"),
+                    self._redact(f"{type(e).__name__}: {e}"),
                 )
+                status = getattr(e, "status_code", None)
+                if status in (400, 401, 403, 404, 422):
+                    raise VLMConfigurationError(self._redact(
+                        f"VLM 模型/鉴权/请求配置错误（model={self.model}, HTTP {status}）：{e}。"
+                        "请核对 vlm.model、接口地域及模型权限，修正后重启程序"
+                    )) from e
                 if used + 1 >= attempts:
                     break
                 time.sleep(0.15 * (used + 1))
         latency = time.perf_counter() - t0
         raise RuntimeError(
-            redact_secrets(f"VLM 检测失败（{used + 1} 次）: {type(last_err).__name__}: {last_err}")
+            self._redact(f"VLM 检测失败（{used + 1} 次）: {type(last_err).__name__}: {last_err}")
         ) from last_err

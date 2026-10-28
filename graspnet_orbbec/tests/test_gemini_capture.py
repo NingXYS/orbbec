@@ -53,7 +53,7 @@ def test_gemini330_pid():
     assert is_gemini330_pid(GEMINI_336L_PID)
     assert not is_gemini330_pid(0x060F)
     backend = detect_capture_backend()
-    assert backend in ("gemini336l", "astra")
+    assert backend in ("gemini336l", "astra", "dabai_dc1")
 
 
 def test_edge_overlay_perfect_align():

@@ -14,7 +14,7 @@ from capture.types import RGBDFrame
 from common.config import Config, load_config
 from infer.match_grasp import GraspMatch, NoGraspMatchError, match_nearest_grasp
 from vlm.target_locator import InsufficientDepthError, LocateResult, locate_target
-from vlm.vlm_client import VLMDetectResult, redact_secrets
+from vlm.vlm_client import VLMConfigurationError, VLMDetectResult, redact_secrets
 
 LOGGER = logging.getLogger("graspnet_orbbec.target_query")
 
@@ -71,6 +71,8 @@ def _classify_vlm_exception(exc: BaseException, timeout_s: float) -> QueryError:
     name = type(exc).__name__.lower()
     msg = redact_secrets(str(exc))
     blob = f"{name} {msg}".lower()
+    if isinstance(exc, VLMConfigurationError):
+        return QueryError("config", msg)
     if isinstance(exc, TimeoutError) or "timeout" in blob or "timed out" in blob:
         return QueryError("timeout", f"VLM 超时（{timeout_s:.0f} 秒），网络或服务无响应，请检查网络后重新输入")
     if any(k in blob for k in ("connection", "connect", "network", "dns", "unreachable", "name or service")):

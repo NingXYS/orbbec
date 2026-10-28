@@ -163,3 +163,53 @@ def test_logger_does_not_contain_key(caplog, monkeypatch):
     logging.getLogger("graspnet_orbbec.vlm").info("key=%s", "sk-SUPERSECRETKEYVALUE")
     # 业务代码不会这么打；脱敏函数必须能清掉
     assert "sk-SUPERSECRETKEYVALUE" not in redact_secrets(caplog.text)
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 422])
+def test_permanent_api_error_is_not_retried(monkeypatch, status):
+    from types import SimpleNamespace as NS
+    from common.config import Config
+    from vlm.vlm_client import VLMClient, VLMConfigurationError
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-TESTKEYNOTREAL000")
+    client = VLMClient(Config({"vlm": {"max_retries": 3}}))
+    calls = []
+
+    class APIError(Exception):
+        status_code = status
+
+    def create(**kwargs):
+        calls.append(kwargs)
+        raise APIError("model_not_found sk-TESTKEYNOTREAL000")
+
+    client._client = NS(chat=NS(completions=NS(create=create)))
+    with pytest.raises(VLMConfigurationError) as ei:
+        client.detect(np.zeros((32, 32, 3), np.uint8), "白色矩形")
+    assert len(calls) == 1
+    assert "sk-TESTKEYNOTREAL000" not in str(ei.value)
+    assert f"HTTP {status}" in str(ei.value)
+
+
+def test_sdk_retries_are_disabled(monkeypatch):
+    from types import SimpleNamespace as NS
+    from common.config import Config
+    from vlm.vlm_client import VLMClient
+
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "sk-TESTKEYNOTREAL000")
+    constructor_args = {}
+    def create_client(**kwargs):
+        constructor_args.update(kwargs)
+        return object()
+    monkeypatch.setitem(sys.modules, "openai", NS(OpenAI=create_client))
+    VLMClient(Config({"vlm": {"timeout_s": 5}}))._openai()
+    assert constructor_args["max_retries"] == 0
+
+
+def test_opaque_key_is_redacted(monkeypatch):
+    from common.config import Config
+    from vlm.vlm_client import VLMClient
+
+    token = "example_opaque_credential_not_real"
+    monkeypatch.setenv("DASHSCOPE_API_KEY", token)
+    client = VLMClient(Config({"vlm": {"max_retries": 0}}))
+    assert token not in client._redact(f"upstream error contains {token}")

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """独立入口：RGB-D 取流预览 / 录制 / 测 FPS / 对齐检验。
 
-相机由 configs/default.yaml 的 camera.backend 决定（gemini336l | astra）。
+相机由 configs/default.yaml 的 camera.backend 决定（dabai_dc1 | gemini336l | astra）。
 
 示例：
   python capture/run_capture.py --preview
@@ -34,7 +34,7 @@ from common.paths import OUTPUT_DIR, timestamp_dir
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="RGB-D 取流（Gemini 336L / Astra）")
+    p = argparse.ArgumentParser(description="RGB-D 取流（DaBai DC1 / Gemini 336L / Astra）")
     p.add_argument("--config", default=None, help="YAML 配置路径")
     p.add_argument("--from-dir", default=None, help="离线目录，不接相机")
     p.add_argument("--preview", action="store_true", help="打开预览窗口")
@@ -115,8 +115,8 @@ def main() -> int:
                     "mean_depth_m": float(last.depth_m[last.depth_m > 0].mean()) if valid else 0.0,
                     "shape": [int(last.color_bgr.shape[1]), int(last.color_bgr.shape[0])],
                     "device": last.extra.get("device", {}),
-                    "profile": last.extra.get("profile", {}),
-                    "note": "验收标准为 0.5 m 处 ≤3 px；当前值为几何边缘互相对应中位数",
+                    "profile": last.extra.get("profiles", last.extra.get("profile", {})),
+                    "note": "当前值为 15 px 搜索范围内匹配几何边缘的中位数；≤3 px 仅为图像诊断，需另在已知距离/尺寸场景验收精度",
                 }
                 (Path(out) / "align.json").write_text(
                     json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"

@@ -1,0 +1,92 @@
+# GraspNet-baseline 阶段一默认配置（采集设备：Gemini 336L）
+camera:
+  backend: gemini336l    # gemini336l | astra | auto | pyorbbec | file；切相机只改这一项
+  align_mode: SW         # 1280x800 无硬件 D2C（FW 1.3.70 最高 HW 为 640x480），用 AlignFilter
+  color_width: 1280
+  color_height: 800
+  color_fps: 30
+  depth_width: 1280      # 336L 原生深度 1280x800
+  depth_height: 800
+  depth_fps: 30
+  laser: true            # 336L 打开激光（LASER_CONTROL_INT=1）
+  min_depth_m: 0.12      # 336L 近距优于 Astra
+  max_depth_m: 3.50      # 采集裁剪；抓取工作空间仍由 workspace.z_max 限制
+  timeout_ms: 2000
+  warmup_frames: 8       # 丢弃前几帧，等自动曝光与深度稳定
+  intrinsics_file: configs/gemini336l_intrinsics.yaml  # RGB / depth 内参各一套
+
+workspace:
+  z_min: 0.15            # 336L 可到约 0.1 m；桌面抓取近裁
+  z_max: 1.80            # 工作距上限；点云在此之外不进 GraspNet
+  use_table_plane: true
+  table_inlier_dist: 0.010  # 1280x800 深度更密，平面内点阈值略收
+  height_min_m: 0.006    # 桌面以上保留点的最小高度
+  height_max_m: 0.30     # 桌面以上保留点的最大高度
+  roi_margin_px: 40      # 1280 宽对应原 640 的 20 px，去掉 D2C 边缘空洞
+  plane_sample_n: 12000  # 高分辨率下 RANSAC 子集，避免 1280x800 拖慢推理
+  plane_reuse_frames: 8  # 连续推理复用桌面平面，少做 RANSAC
+
+graspnet:
+  checkpoint: weights/checkpoint-rs.tar
+  num_point: 20000       # 网络输入点数不变；从更密的 1280x800 云里采样
+  num_view: 300
+  collision_thresh: 0.01
+  voxel_size: 0.008      # 碰撞体素随高分辨率略加密（旧相机 0.01）
+  collision_max_points: 40000  # 碰撞云规模对齐旧 640x480 量级
+  display_voxel: 0.004   # 可视化下采样；1280x800 比 640x480 更密
+  top_k: 50
+  seed: 42
+
+filter:
+  max_approach_angle_deg: 70   # 接近方向与桌面法向夹角
+  min_height_above_table_m: 0.008
+  max_height_above_table_m: 0.25
+  min_width_m: 0.01
+  max_width_m: 0.10
+  min_score: 0.05
+
+viz:
+  width: 1280
+  height: 720
+  gripper_count: 50
+  point_size: 2.0
+
+vlm:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 旧 Qwen3-VL 快照已下线，固定官方推荐替代模型的版本。
+  model: qwen3.6-flash-2026-04-16
+  timeout_s: 5.0
+  max_retries: 2          # 解析/网络失败最多再试 2 次
+  temperature: 0.0
+  max_tokens: 256
+  enable_thinking: false
+  jpeg_quality: 85
+  max_side: 1280          # 长边上限，控延迟
+  coord_space: norm1000   # bbox 约定 0–1000 相对坐标，客户端再映射到像素
+  response_format: json_object
+  system_prompt: |
+    你是桌面目标检测器。只输出一个 JSON 对象，不要 markdown，不要解释，不要思考过程。
+    格式必须是：
+    {"found": true, "bbox_2d": [x1, y1, x2, y2]}
+    或
+    {"found": false, "bbox_2d": [0, 0, 0, 0]}
+    bbox_2d 为相对坐标，范围 0 到 1000，[x1,y1] 左上、[x2,y2] 右下。
+    目标不在图中时 found 必须为 false。禁止把颜色相近的小装饰、贴纸、屏幕内容或远处杂物当成目标。
+    只框用户指定的那一个目标本身的最小外接矩形，不要包含桌面、其它物体或大片背景。
+  user_prompt: "目标：{target}"
+
+locator:
+  min_depth_m: 0.12
+  max_depth_m: 3.50
+  min_valid_points: 50     # 少于此数视为空洞，明确报错
+  bbox_shrink: 0.08        # 向内收缩，减少框边背景
+  depth_band_m: 0.06       # 只取中位数深度 ±6 cm 的点
+  max_locate_ms: 50
+
+live:
+  vlm_timeout_s: 10        # 点名 API 硬超时，断网不卡死
+  vlm_max_retries: 0       # 实时路径只打一次，避免重试叠出 5s
+  min_match_score: 0.08    # 低于此视为异常低分，不高亮
+  max_match_dist_m: 0.20   # 最近抓取距质心超过则失败
+  pipeline_budget_s: 5.0   # 提交到高亮的目标时延
+

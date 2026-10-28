@@ -1,28 +1,32 @@
-# GraspNet-baseline 阶段一默认配置（采集设备：Gemini 336L）
+# GraspNet-baseline 默认配置（采集设备：DaBai DC1）
 camera:
-  backend: gemini336l    # gemini336l | astra | auto | pyorbbec | file；切相机只改这一项
-  align_mode: SW         # 1280x800 无硬件 D2C（FW 1.3.70 最高 HW 为 640x480），用 AlignFilter
-  color_width: 1280
-  color_height: 800
+  backend: dabai_dc1     # dabai_dc1 | gemini336l | astra | auto | file
+  serial: CC1N162037K    # 打开后核验实际序列号，避免混用另一台相机的参数
+  align_mode: HW        # 仅接受 SDK 硬件 D2C，不用 resize 冒充配准
+  color_width: 640
+  color_height: 480
+  color_format: MJPG
   color_fps: 30
-  depth_width: 1280      # 336L 原生深度 1280x800
-  depth_height: 800
+  depth_width: 640      # 原始流 640x400；D2C 后输出 640x480
+  depth_height: 400
+  depth_format: Y11     # SDK 解包后的实际帧为 uint16/Y16
   depth_fps: 30
-  laser: true            # 336L 打开激光（LASER_CONTROL_INT=1）
-  min_depth_m: 0.12      # 336L 近距优于 Astra
-  max_depth_m: 3.50      # 采集裁剪；抓取工作空间仍由 workspace.z_max 限制
+  laser: true           # 采集期间开启发射器；退出恢复之前的开关状态
+  min_depth_m: 0.30
+  max_depth_m: 2.50
   timeout_ms: 2000
-  warmup_frames: 8       # 丢弃前几帧，等自动曝光与深度稳定
-  intrinsics_file: configs/gemini336l_intrinsics.yaml  # RGB / depth 内参各一套
+  startup_timeout_ms: 10000
+  warmup_frames: 8
+  max_receive_delta_ms: 100  # 仅筛选主机接收差，DC1 不支持曝光同步
 
 workspace:
-  z_min: 0.15            # 336L 可到约 0.1 m；桌面抓取近裁
+  z_min: 0.30            # DC1 初始近裁；实际工作距离需真机验证
   z_max: 1.80            # 工作距上限；点云在此之外不进 GraspNet
   use_table_plane: true
   table_inlier_dist: 0.010  # 1280x800 深度更密，平面内点阈值略收
   height_min_m: 0.006    # 桌面以上保留点的最小高度
   height_max_m: 0.30     # 桌面以上保留点的最大高度
-  roi_margin_px: 40      # 1280 宽对应原 640 的 20 px，去掉 D2C 边缘空洞
+  roi_margin_px: 20      # 640 宽画面，避开 D2C 边缘空洞
   plane_sample_n: 12000  # 高分辨率下 RANSAC 子集，避免 1280x800 拖慢推理
   plane_reuse_frames: 8  # 连续推理复用桌面平面，少做 RANSAC
 
@@ -53,8 +57,8 @@ viz:
 
 vlm:
   base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
-  # 百炼快照（不要用无日期的稳定别名，避免静默换代）
-  model: qwen3-vl-flash-2026-01-22
+  # 旧 Qwen3-VL 快照已下线，固定官方推荐替代模型的版本。
+  model: qwen3.6-flash-2026-04-16
   timeout_s: 5.0
   max_retries: 2          # 解析/网络失败最多再试 2 次
   temperature: 0.0
@@ -89,4 +93,33 @@ live:
   min_match_score: 0.08    # 低于此视为异常低分，不高亮
   max_match_dist_m: 0.20   # 最近抓取距质心超过则失败
   pipeline_budget_s: 5.0   # 提交到高亮的目标时延
+
+wire:
+  min_sam_score: 0.5
+  checkpoint: weights/sam2/sam2.1_hiera_small.pt
+  model_config: configs/sam2.1/sam2.1_hiera_s.yaml
+  crop_margin_px: 24
+  max_mask_fraction: 0.65
+  inset_px: 12            # 沿中心线距端部的像素距离，不是毫米或机器人抓取偏置
+  auto:
+    method: line_prompts
+    max_seeds: 64
+    seed_spacing_px: 32
+    min_contrast: 12
+    prompt_batch: 8
+    warmup_s: 0.8
+    points_per_side: 32
+    points_per_batch: 32
+    min_score: 0.5
+    stability_score: 0.8
+    max_area_fraction: 0.20
+    max_width_fraction: 0.02 # 放宽旧细线阈值，同时排除较宽桌沿/背景区域
+    min_length_fraction: 0.06
+    min_slenderness: 12
+    max_masks: 32
+    terminal_enabled: true
+    terminal_weights: ../best.pt
+    terminal_class_ids: [0]
+    terminal_label: 线材金属端子
+    terminal_confidence: 0.4
 

@@ -1,0 +1,16 @@
+best.pt
+apikey.md
+Log/
+*.log
+
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+
+.conda/
+.yolo-deps/
+
+output/
+*.ply

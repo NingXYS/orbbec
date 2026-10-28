@@ -93,7 +93,7 @@ def evaluate_frame(frame: RGBDFrame, expected_block_m: Optional[float] = None) -
     aabb = estimate_object_aabb(cloud, plane)
     notes = []
     if hole_r > 0.4:
-        notes.append("有效深度比例偏低，可能超出 Astra Pro Plus 近距（约 0.6 m）或物体反光/透明")
+        notes.append("有效深度比例偏低，请检查工作距离、遮挡，以及物体反光/透明情况")
     if edge is not None and edge > 10:
         notes.append(f"RGB-D 边缘对齐中位偏差 {edge:.1f} px，超过 10 px 验收阈值")
     if expected_block_m is not None and aabb is not None:

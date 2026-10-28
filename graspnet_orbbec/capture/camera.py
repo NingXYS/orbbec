@@ -657,6 +657,9 @@ def save_rgbd_dir(frame: RGBDFrame, out_dir: str | Path) -> Path:
         "timestamp_ns": frame.timestamp_ns,
         "device": frame.extra.get("device", {}),
     }
+    if frame.backend == "dabai_dc1":
+        meta["capture_metadata"] = frame.extra
+        meta["source_depth_scale_mm"] = frame.depth_scale
     if frame.depth_to_color is not None:
         meta["depth_to_color"] = frame.depth_to_color.to_dict()
     (out_dir / "intrinsics.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -666,8 +669,8 @@ def save_rgbd_dir(frame: RGBDFrame, out_dir: str | Path) -> Path:
 def open_camera(cfg: Optional[Config] = None, data_dir: Optional[str | Path] = None):
     """按 camera.backend 打开相机或离线目录。
 
-    backend: auto | gemini336l | astra | pyorbbec | file
-    auto 按 USB PID 选择（336L / Gemini 330 优先）。切相机只改这一项。
+    backend: auto | dabai_dc1 | gemini336l | astra | pyorbbec | file
+    auto 按 USB PID 选择（336L / Gemini 330 优先）。切换型号时也需匹配流配置。
     """
     cfg = cfg or load_config()
     backend = str(cfg.get_path("camera.backend", "auto")).lower()
@@ -684,6 +687,10 @@ def open_camera(cfg: Optional[Config] = None, data_dir: Optional[str | Path] = N
         from capture.gemini336l import Gemini336LCamera
 
         return Gemini336LCamera(cfg)
+    if backend in ("dabai_dc1", "dc1"):
+        from capture.dabai_dc1 import DaBaiDC1Camera
+
+        return DaBaiDC1Camera(cfg)
     if backend in ("astra", "pyorbbec", "astra_pro_plus"):
         return AstraCamera(cfg)
-    raise ValueError(f"未知 camera.backend={backend}，可选 auto|gemini336l|astra|file")
+    raise ValueError(f"未知 camera.backend={backend}，可选 auto|dabai_dc1|gemini336l|astra|file")

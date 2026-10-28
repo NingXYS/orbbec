@@ -1,4 +1,5 @@
 .conda/
+.yolo-deps/
 __pycache__/
 *.pyc
 *.pyo
@@ -11,6 +12,9 @@ output/
 weights/*.tar
 weights/*.pth
 weights/*.ckpt
+weights/sam2/
+third_party/sam2/
+third_party/sam2_runtime/
 *.ply
 *.log
 .ipynb_checkpoints/
@@ -19,3 +23,4 @@ weights/*.ckpt
 third_party/graspnet-baseline/pointnet2/build/
 third_party/graspnet-baseline/knn/build/
 *.egg
+Log/

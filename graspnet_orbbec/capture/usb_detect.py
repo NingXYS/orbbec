@@ -9,6 +9,8 @@ ORBBEC_VID = 0x2BC5
 ASTRA_PRO_PLUS_DEPTH_PID = 0x060F
 ASTRA_PRO_PLUS_COLOR_PID = 0x050F
 GEMINI_336L_PID = 0x0807
+DABAI_DC1_DEPTH_PID = 0x0657
+DABAI_DC1_COLOR_PID = 0x0557
 # Gemini 330 系列常见 PID 段（335/336/330 及 L 变体）
 GEMINI330_PID_MIN = 0x0800
 GEMINI330_PID_MAX = 0x0810
@@ -54,7 +56,7 @@ def is_gemini330_pid(pid: int) -> bool:
 
 
 def detect_capture_backend() -> str:
-    """按插入设备选择 capture backend：gemini336l / astra。
+    """按插入设备选择 capture backend：gemini336l / dabai_dc1 / astra。
 
     两台都在时优先 Gemini 336L（当前主采集设备）。
     """
@@ -62,6 +64,8 @@ def detect_capture_backend() -> str:
     pids = {int(d["pid"]) for d in devices}
     if GEMINI_336L_PID in pids or any(is_gemini330_pid(p) for p in pids):
         return "gemini336l"
+    if DABAI_DC1_DEPTH_PID in pids:
+        return "dabai_dc1"
     if ASTRA_PRO_PLUS_DEPTH_PID in pids or ASTRA_PRO_PLUS_COLOR_PID in pids:
         return "astra"
     return "gemini336l"

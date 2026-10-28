@@ -119,6 +119,18 @@ def test_timeout_and_network():
     assert "网络" in ei.value.message
 
 
+def test_unavailable_model_is_configuration_error():
+    from vlm.vlm_client import VLMConfigurationError
+
+    with pytest.raises(QueryError) as ei:
+        run_target_query(
+            _frame(), "x", _gg([[0, 0, 0.5]], [0.9]),
+            FakeClient(exc=VLMConfigurationError("模型不可用，请核对模型配置")), cfg=_cfg(),
+        )
+    assert ei.value.kind == "config"
+    assert "模型不可用" in ei.value.message
+
+
 def test_no_depth():
     with pytest.raises(QueryError) as ei:
         run_target_query(_frame(hole=True), "x", _gg([[0, 0, 0.5]], [0.9]), FakeClient(), cfg=_cfg())
