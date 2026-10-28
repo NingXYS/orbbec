@@ -101,6 +101,8 @@ wire:
   crop_margin_px: 24
   max_mask_fraction: 0.65
   inset_px: 12            # 沿中心线距端部的像素距离，不是毫米或机器人抓取偏置
+  grasp_policy:
+    offset_mm: 10        # 从人工确认的金属/绝缘交界沿线身后退；TCP偏置另行标定
   auto:
     method: line_prompts
     max_seeds: 64

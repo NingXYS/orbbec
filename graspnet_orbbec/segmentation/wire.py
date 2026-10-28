@@ -38,6 +38,8 @@ class WireResult:
     automation: dict = field(default_factory=dict)
     terminal_detections: list[dict] = field(default_factory=list)
     terminal_masks: list[np.ndarray] = field(default_factory=list)
+    grasp_policy: dict = field(default_factory=dict)
+    grasp_plans: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +52,7 @@ class WireResult:
             "coordinate_space": "original_rgb_pixels",
             "automation": self.automation,
             "terminal_detections": self.terminal_detections,
+            "grasp_policy": self.grasp_policy, "grasp_plans": self.grasp_plans,
         }
 
 
@@ -215,6 +218,8 @@ def analyze_mask(image_bgr: np.ndarray, mask: np.ndarray, *, score: float = 0,
                                    "tip_xy": directed[0].astype(int).tolist(),
                                    "near_tip_xy": directed[i].astype(int).tolist(),
                                    "tangent_xy": axis.tolist(),
+                                   "inward_path_xy": directed.astype(int).tolist(),
+                                   "path_ambiguous": bool(local_paths),
                                    "inset_px": float(distances[i]),
                                    "end_region_pixels": int(region.sum()),
                                    "end_region_extent_px": float(2 * inset_px),
@@ -352,10 +357,20 @@ def draw_result(result: WireResult) -> np.ndarray:
         axis = np.asarray(item["tangent_xy"])
         normal = np.array([-axis[1], axis[0]])
         cv2.circle(vis, tuple(tip), 5, (255, 255, 0), 1)
+        if result.grasp_policy:
+            cv2.putText(vis, item['id'], tuple(tip+[8,-8]), cv2.FONT_HERSHEY_SIMPLEX, .6, (255,255,0), 2)
+            continue
         cv2.circle(vis, tuple(near), 7, (0, 0, 255), 1)
         cv2.line(vis, tuple(np.rint(near - normal * 9).astype(int)),
                  tuple(np.rint(near + normal * 9).astype(int)), (0, 0, 255), 2)
         cv2.putText(vis, item["id"], tuple(near + [9, -8]), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+    for plan in result.grasp_plans:
+        if plan.get('boundary_confirmed'):
+            point = tuple(np.rint(plan['boundary_xy']).astype(int))
+            cv2.drawMarker(vis, point, (255,160,255), cv2.MARKER_DIAMOND, 12, 2)
+        if plan.get('grasp_xy_preview') is not None:
+            point = tuple(np.rint(plan['grasp_xy_preview']).astype(int))
+            cv2.drawMarker(vis, point, (0,255,0), cv2.MARKER_CROSS, 14, 2)
     for detection, mask in zip(result.terminal_detections, result.terminal_masks):
         vis[mask] = (vis[mask] * 0.3 + np.array([255, 220, 0]) * 0.7).astype(np.uint8)
         contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)

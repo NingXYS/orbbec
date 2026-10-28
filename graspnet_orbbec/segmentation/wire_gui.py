@@ -16,6 +16,7 @@ import numpy as np
 from capture.color_camera import FileColorCamera as FileCamera, open_color_camera as open_camera
 from common.paths import OUTPUT_DIR
 from segmentation.wire import Sam2WireSegmenter, draw_result, save_result
+from segmentation.grasp_policy import apply_grasp_policy, confirm_boundary
 from vlm.target_locator import put_cjk
 
 
@@ -96,6 +97,7 @@ class SegmentationWorker(threading.Thread):
                         from segmentation.automatic import AutomaticWireRecognizer
                         self.auto_recognizer = AutomaticWireRecognizer(self.cfg, self.segmenter)
                     result = self.auto_recognizer.recognize(image)
+                    apply_grasp_policy(result, self.cfg)
                     self.results.put((revision, result, None))
                     continue
                 if target:
@@ -106,6 +108,7 @@ class SegmentationWorker(threading.Thread):
                     box = detection.bbox_2d
                 result = self.segmenter.segment(image, box=box, points=points, labels=labels,
                                                 target=target or "线材")
+                apply_grasp_policy(result, self.cfg)
                 self.results.put((revision, result, None))
             except Exception as exc:
                 self.results.put((revision, None, str(exc)))
@@ -129,10 +132,13 @@ def render_canvas(live, state):
         canvas[64:64 + h, w:] = draw_result(state.result)
     title = "识别原图（已冻结）" if state.source is not None else ("最近画面（取流中断）" if state.camera_error else "实时原图")
     put_cjk(canvas, title, (10, 30), size=20)
-    put_cjk(canvas, "SAM2 像素掩码 / 中心线 / 端部附近候选（原图快照）", (w + 10, 30), size=18)
-    put_cjk(canvas, "R：自动识别新一帧 | 拖框/点选纠正 | 空格/C：实时 | S：保存 | Q：退出", (10, h + 92), size=19)
+    put_cjk(canvas, "SAM2 掩码 / 端点 / 夹持中心预览（原图快照）", (w + 10, 30), size=18)
+    put_cjk(canvas, "R：自动识别 | Shift+左键：确认交界 | 拖框/点选纠正 | 空格/C：实时 | S：保存 | Q：退出", (10, h + 92), size=18)
     put_cjk(canvas, (state.camera_error or state.message)[:100], (10, h + 120), color=(0, 220, 255), size=18)
     warning = state.result.warnings[0] if state.result is not None and state.result.warnings else "A/B为几何候选；青色T为端子模型检测，仍需确认；仅输出二维像素位置"
+    if state.result is not None and state.result.grasp_policy:
+        offset = state.result.grasp_policy['offset_mm']
+        warning = f'策略：交界后沿线身 {offset:g} mm；A/B为端点，粉色为交界，绿色为有尺度的夹持中心预览'
     put_cjk(canvas, warning[:100], (10, h + 151), color=(0, 190, 255), size=18)
     return canvas
 
@@ -163,6 +169,22 @@ def run(cfg, args, input_channel):
             return
         h, w = latest.shape[:2]
         point = panel_point(x, y, w, h)
+        if point is not None and event == cv2.EVENT_LBUTTONDOWN and flags & cv2.EVENT_FLAG_SHIFTKEY:
+            capture_pending, drag_start = False, None
+            if state.result is None:
+                state.message = '请先分割线材，再Shift+左键确认金属/绝缘交界'
+                return
+            try:
+                chosen = confirm_boundary(state.result, point, cfg)
+                plan = next(p for p in state.result.grasp_plans if p['candidate_id'] == chosen)
+                if plan['status'] == 'wire_instance_ambiguous':
+                    state.message = f'{chosen}交界已记录；请先分开粘连线材，路径存在歧义'
+                else:
+                    state.message = f'{chosen}交界已确认；沿线身后退{plan["offset_mm"]:g}mm，待真实三维尺度'
+            except ValueError as exc:
+                state.message = str(exc)
+            print(state.message, flush=True)
+            return
         if event == cv2.EVENT_LBUTTONUP and drag_start is not None:
             origin, drag_start = drag_start, None
             if point is None:
@@ -197,7 +219,7 @@ def run(cfg, args, input_channel):
             input_channel.start_stdin()
         cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(window, mouse)
-        print("线材识别窗口已打开：R自动取一帧识别；拖框/点选可纠正。空格/C恢复实时，S保存，Q退出。", flush=True)
+        print("线材识别窗口已打开：R自动识别；Shift+左键确认金属/绝缘交界。空格/C恢复实时，S保存，Q退出。", flush=True)
         if args.wire_auto:
             state.message = "相机预热后自动取一帧识别，无需框选…"
             print(state.message, flush=True)
@@ -247,7 +269,7 @@ def run(cfg, args, input_channel):
                             state.message += f"；端子模型检出 {len(result.terminal_detections)} 个"
                             print(f'本次自动识别 {result.elapsed_s:.3f}s；{result.automation.get("sampling", {}).get("seed_count", "?")} 个自动提示', flush=True)
                         for item in result.candidates:
-                            print(f"候选{item['id']}: 端点={item['tip_xy']} 附近={item['near_tip_xy']} 像素（未确认）", flush=True)
+                            print(f"端点{item['id']}: {item['tip_xy']} 像素；夹持中心策略为交界后退{result.grasp_policy['offset_mm']:g}mm（待确认交界/三维尺度）", flush=True)
                         for item in result.terminal_detections:
                             print(f"端子模型{item['id']}: confidence={item['confidence']:.3f}（模型检测，未人工确认）", flush=True)
                         for warning in result.warnings:
