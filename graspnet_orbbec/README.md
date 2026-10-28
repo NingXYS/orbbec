@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Current status (2026-10-28):** This subsystem has progressed beyond the older stage boundaries below. The repository now includes a MoveIt 2 dual-pose execution toolkit with real AR6E-R700 validation, plus SAM2 wire segmentation and a 3D arc-length wire grasp policy. See the [repository root README](../README.md), [MoveIt validation](docs/MoveIt双位姿验证记录_20260914.md), and [wire grasp policy](docs/WIRE_GRASP_POLICY.md). Sections describing MoveIt as “not done” are retained only as historical stage context.
+
 # GraspNet + Orbbec RGB-D 相机
 
 当前默认相机为 **DaBai DC1**，保留 Gemini 336L 和 Astra Pro Plus 后端。GraspNet-baseline（SJTU, CVPR 2020）推理链路：对齐 RGB-D → 点云 → 6-DoF 抓取位姿 → 可视化。相机接入与推理入口不发送机械臂运动命令。
