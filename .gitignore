@@ -14,3 +14,9 @@ __pycache__/
 
 output/
 *.ply
+# Secrets / local credentials
+.env
+.env.*
+*.key
+*.pem
+secrets/
