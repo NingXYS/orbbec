@@ -16,7 +16,7 @@ import numpy as np
 from capture.color_camera import FileColorCamera as FileCamera, open_color_camera as open_camera
 from common.paths import OUTPUT_DIR
 from segmentation.wire import Sam2WireSegmenter, draw_result, save_result
-from segmentation.grasp_policy import apply_grasp_policy, confirm_boundary
+from segmentation.grasp_policy import apply_grasp_policy, confirm_boundary, confirm_body_boundary
 from vlm.target_locator import put_cjk
 
 
@@ -143,7 +143,7 @@ def render_canvas(live, state):
     return canvas
 
 
-def run(cfg, args, input_channel):
+def run(cfg, args, input_channel, handeye_bridge=None):
     cam = FileCamera(args.from_dir, loop=True) if args.from_dir else open_camera(cfg)
     state = PromptState()
     worker = SegmentationWorker(cfg)
@@ -175,15 +175,25 @@ def run(cfg, args, input_channel):
                 state.message = '请先分割线材，再Shift+左键确认金属/绝缘交界'
                 return
             try:
-                chosen = confirm_boundary(state.result, point, cfg)
+                confirmer = confirm_body_boundary if handeye_bridge is not None else confirm_boundary
+                chosen = confirmer(state.result, point, cfg)
+                if handeye_bridge is not None:
+                    handeye_bridge.apply(state.result, cfg)
                 plan = next(p for p in state.result.grasp_plans if p['candidate_id'] == chosen)
                 if plan['status'] == 'wire_instance_ambiguous':
                     state.message = f'{chosen}交界已记录；请先分开粘连线材，路径存在歧义'
+                elif plan['status'] == 'base_frame_preview_ready':
+                    xyz = np.asarray(plan['grasp_base_m']) * 1000
+                    suffix = '（棋盘面投影，尚非线材中心）' if plan['surface_projection_only'] else '（坐标预览）'
+                    state.message = f'{chosen} 基座XYZ：{xyz[0]:.1f}, {xyz[1]:.1f}, {xyz[2]:.1f} mm {suffix}'
                 else:
                     state.message = f'{chosen}交界已确认；沿线身后退{plan["offset_mm"]:g}mm，待真实三维尺度'
             except ValueError as exc:
                 state.message = str(exc)
             print(state.message, flush=True)
+            return
+        if handeye_bridge is not None and event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN):
+            state.message = '手眼确认模式：请按住Shift再左键点交界；R重新自动识别，S保存'
             return
         if event == cv2.EVENT_LBUTTONUP and drag_start is not None:
             origin, drag_start = drag_start, None
@@ -265,6 +275,13 @@ def run(cfg, args, input_channel):
                 if state.accept(revision, result, error):
                     print(state.message, flush=True)
                     if result is not None:
+                        if handeye_bridge is not None:
+                            try:
+                                handeye_bridge.apply(result, cfg)
+                                state.message += '；手眼快照已绑定，Shift+左键确认交界计算基座坐标'
+                            except ValueError as exc:
+                                state.message = f'手眼定位拒绝：{exc}'
+                                print(state.message, flush=True)
                         if result.automation:
                             state.message += f"；端子模型检出 {len(result.terminal_detections)} 个"
                             print(f'本次自动识别 {result.elapsed_s:.3f}s；{result.automation.get("sampling", {}).get("seed_count", "?")} 个自动提示', flush=True)

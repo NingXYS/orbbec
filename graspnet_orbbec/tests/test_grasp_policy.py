@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from common.config import Config
-from segmentation.grasp_policy import plan_candidate, apply_grasp_policy, confirm_boundary
+from segmentation.grasp_policy import plan_candidate, apply_grasp_policy, confirm_boundary, confirm_body_boundary
 from segmentation.wire import analyze_mask, draw_result, save_result
 
 
@@ -28,6 +28,39 @@ def test_default_requires_boundary_and_has_no_commanded_pose():
     assert plan['status']=='boundary_required'
     assert plan['grasp_camera_m'] is None
     assert not plan['robot_pose_valid'] and not plan['tcp_compensation_applied']
+
+
+def test_manual_body_boundary_can_use_rejected_seam_without_claiming_terminal_tip():
+    image = np.full((100, 200, 3), 160, np.uint8)
+    mask = np.zeros((100, 200), np.uint8)
+    cv2.line(mask, (20, 50), (150, 50), 1, 3)
+    result = analyze_mask(image, mask)
+    rejected = result.candidates[0].copy()
+    result.candidates, result.end_regions = [], []
+    rejected['rejection_reason'] = 'image_line_continues_past_mask_tip'
+    result.automation['rejected_geometric_ends'] = [rejected]
+    apply_grasp_policy(result, Config({}))
+    chosen = confirm_body_boundary(result, rejected['tip_xy'], Config({}))
+    assert chosen == 'J1'
+    assert result.candidates[0]['kind'] == 'manually_confirmed_body_boundary_path'
+    assert result.grasp_plans[0]['boundary_confirmed']
+    assert result.grasp_plans[0]['status'] == 'metric_path_required'
+    assert result.to_dict()['terminal_semantics_verified'] is False
+
+
+def test_manual_boundary_does_not_restore_ambiguous_seams_or_mutate_on_error():
+    image = np.full((100, 200, 3), 160, np.uint8)
+    mask = np.zeros((100, 200), np.uint8)
+    cv2.line(mask, (20, 50), (150, 50), 1, 3)
+    result = analyze_mask(image, mask)
+    rejected = result.candidates[0].copy()
+    result.candidates, result.end_regions = [], []
+    rejected.update(rejection_reason='image_line_continues_past_mask_tip', path_ambiguous=True)
+    result.automation['rejected_geometric_ends'] = [rejected]
+    apply_grasp_policy(result, Config({}))
+    with pytest.raises(ValueError):
+        confirm_body_boundary(result, rejected['tip_xy'], Config({}))
+    assert not result.candidates and not result.grasp_plans
 
 
 def test_confirmed_boundary_does_not_turn_pixels_into_millimeters():

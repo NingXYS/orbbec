@@ -228,6 +228,39 @@ def test_worker_automatic_mode_uses_snapshot_without_vlm_or_manual_segment():
         worker.stop()
 
 
+def test_roi_restores_masks_boxes_seeds_and_paths_to_original_rgb():
+    image = np.full((480, 640, 3), 128, np.uint8)
+    roi = [100, 200, 500, 400]
+    cfg = Config({'wire': {'auto': {'roi_xyxy': roi, 'max_width_fraction': .04}}})
+    local = np.zeros((200, 400), np.uint8)
+    cv2.line(local, (20, 100), (350, 100), 1, 3)
+    terminal = np.zeros_like(local, bool)
+    terminal[96:105, 18:30] = True
+    recognizer = AutomaticWireRecognizer(cfg)
+    def generate(crop):
+        assert crop.shape == (200, 400, 3)
+        recognizer.generation_stats = {'seed_points_xy': [[20, 100]], 'seed_count': 1}
+        return [record(local.astype(bool))]
+    recognizer._generate = generate
+    recognizer._detect_terminals = lambda crop: ([{'id': 'T1', 'confidence': .9,
+        'bbox_xyxy': [18, 96, 30, 105], 'mask_file': 'terminal_T1.png'}], [terminal])
+    result = recognizer.recognize(image)
+    assert result.mask.shape == (480, 640)
+    assert result.mask[300, 120] and not result.mask[:200].any()
+    assert result.terminal_detections[0]['bbox_xyxy'] == [118, 296, 130, 305]
+    assert result.terminal_masks[0][300, 120]
+    assert result.automation['sampling']['seed_points_xy'] == [[120, 300]]
+    assert all(c['tip_xy'][1] == pytest.approx(300, abs=1) for c in result.candidates)
+    assert np.array_equal(result.image_bgr, image)
+
+
+@pytest.mark.parametrize('roi', [[-1, 0, 100, 100], [0, 0, 999, 99], [0, 0, 10, 10], [0., 0, 100, 100]])
+def test_roi_invalid_coordinates_are_rejected(roi):
+    recognizer = AutomaticWireRecognizer(Config({'wire': {'auto': {'roi_xyxy': roi}}}))
+    with pytest.raises(ValueError, match='工作区'):
+        recognizer.recognize(np.zeros((480, 640, 3), np.uint8))
+
+
 def test_auto_cli_implies_wire_and_rejects_manual_prompts(monkeypatch):
     from scripts.run_live_gui import parse_args
     monkeypatch.setattr(sys, 'argv', ['run_live_gui.py', '--wire-auto', '--no-target'])

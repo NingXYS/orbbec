@@ -5,6 +5,10 @@
 
 当前默认相机为 **DaBai DC1**，保留 Gemini 336L 和 Astra Pro Plus 后端。GraspNet-baseline（SJTU, CVPR 2020）推理链路：对齐 RGB-D → 点云 → 6-DoF 抓取位姿 → 可视化。相机接入与推理入口不发送机械臂运动命令。
 
+## 线材手眼联调
+
+已增加037K手眼结果绑定、只读RGB/法兰反馈配对、自动线身识别、交界后退10mm和基座坐标预览，并提供独立的离线规划及分步试验执行器。入口：`bash scripts/run_wire_grasp.sh audit`；操作、原厂夹爪名义参考和执行门槛见 [线材手眼联调](docs/WIRE_HANDEYE_TRIAL.md)。执行器默认不发送指令，尚未完成真实抓取验收。
+
 ## DaBai DC1
 
 本机环境已就绪，关闭 OrbbecViewer 后运行：

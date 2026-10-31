@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "camera_serial": "CC1N162037K",
+  "robot_model": "PIPER X",
+  "effector": "official_agx_gripper_with_original_fingers",
+  "verified": false,
+  "verification": "official_model_nominal_preview_only",
+  "frame_definition": "x_closing_y_cross_z_approach",
+  "reference_point": "midpoint_of_two_finger_link_origins_at_nominal_tip_plane",
+  "T_flange_grasp": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0.1425], [0, 0, 0, 1]],
+  "evidence": "官方PIPER X xacro：link6到flange_link为单位变换；flange_link到gripper_base沿Z 4.5mm、绕Z 90deg；两夹指joint原点沿gripper_base Z 138mm，闭合轴转到法兰X。相加得到夹指link原点中点Z=142.5mm。这是模型名义参考，不是SDK预设TCP，也不等于实测接触中心。",
+  "source_url": "https://github.com/agilexrobotics/agx_arm_urdf/blob/680fa925cd00db7e2628563d2edc5540963045de/piper_x/urdf/piper_x_with_gripper_description.xacro",
+  "source_snapshot": "docs/vendor/piper_x_with_gripper_680fa925.xacro",
+  "limitations": ["尚需核实实物安装角度、原厂夹指版本和法兰反馈与模型link6的对应关系", "夹指实际接触可位于尖端后方，不能把该点自动当成夹持中心", "不能以该名义参数执行桌面下降抓取或声称TCP已标定"]
+}

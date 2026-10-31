@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "handeye_root": "../../PIPER X/hand-eye-calibration",
+  "calibration_report": "reports/dc1_037K_20261030_calibration_01",
+  "camera_serial": "CC1N162037K",
+  "method": "PARK",
+  "method_selection_basis": "PARK与TSAI接近；用户要求以当前误差进行联调，仅用于坐标预览，不代表精度验收",
+  "channel": "can0",
+  "firmware_report": "reports/robot-firmware-live-decoded.json",
+  "sha256": {
+    "result": "ed1d981d430b2abd49bfd49b70764edfa4aa36e945d458eb95b68f6123fe4a09",
+    "camera": "66c492f3456db4c2d7aed234154b470b3f50795b5819114f5b98637625dadae2",
+    "session": "652d848387eb8e90105d85fae4d85dea8ba1bc8911283ec50101509c47b9aa2f"
+  }
+}

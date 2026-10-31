@@ -86,10 +86,10 @@ def prune_continuing_endpoints(result, cfg):
         result.warnings.append(f'原图线条仍在延伸，已排除{len(rejected)}个疑似掩码断口候选')
 
 
-def select_wire_masks(image, records, cfg):
+def select_wire_masks(image, records, cfg, reference_shape=None):
     """筛选线状前景，保留没有可靠端点的线身；几何筛选不赋予类别语义。"""
     h, w = image.shape[:2]
-    scale = min(h, w)
+    scale = min(reference_shape or (h, w))
     choices = []
     seen = []
     for record in sorted(records, key=lambda r: float(r['predicted_iou']), reverse=True):
@@ -268,6 +268,18 @@ class AutomaticWireRecognizer:
     def recognize(self, image):
         if image is None or image.ndim != 3 or image.shape[2] != 3:
             raise SegmentationError('自动识别需要原始BGR彩色图像')
+        full_image = image
+        h, w = image.shape[:2]
+        roi = self.cfg.get_path('wire.auto.roi_xyxy')
+        if roi is None:
+            roi = [0, 0, w, h]
+        if (not isinstance(roi, (list, tuple)) or len(roi) != 4
+                or any(type(v) is not int for v in roi)):
+            raise ValueError('自动识别工作区必须是原图整数像素xyxy')
+        x1, y1, x2, y2 = roi
+        if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h and min(x2-x1, y2-y1) >= 32):
+            raise ValueError('自动识别工作区越界或小于32像素')
+        image = image[y1:y2, x1:x2]
         start = time.perf_counter()
         detections, terminal_masks, terminal_error = [], [], None
         terminal_enabled = self.cfg.get_path('wire.auto.terminal_enabled', True)
@@ -285,20 +297,35 @@ class AutomaticWireRecognizer:
         terminal_s = time.perf_counter() - start
         records = self._generate(image)
         sam_s = time.perf_counter() - start - terminal_s
-        selected = select_wire_masks(image, records, self.cfg)
+        selected = select_wire_masks(image, records, self.cfg, reference_shape=full_image.shape[:2])
+        if 'seed_points_xy' in self.generation_stats:
+            self.generation_stats['seed_points_xy'] = (
+                np.asarray(self.generation_stats['seed_points_xy']).reshape(-1, 2)+[x1, y1]).tolist()
+        self.generation_stats['coordinate_space'] = 'original_rgb_pixels'
+        # 推理可限于工作区，但所有保存像素、交界和手眼射线必须恢复到原始RGB坐标。
+        def restore(mask):
+            output = np.zeros((h, w), bool)
+            output[y1:y2, x1:x2] = mask
+            return output
+        terminal_masks = [restore(mask) for mask in terminal_masks]
+        for detection in detections:
+            box = np.asarray(detection['bbox_xyxy']) + [x1, y1, x1, y1]
+            detection['bbox_xyxy'] = box.tolist()
         if selected:
-            mask = np.logical_or.reduce([m for m, _ in selected])
-            result = analyze_mask(image, mask, score=float(np.mean([i['sam_score'] for _, i in selected])),
+            mask = restore(np.logical_or.reduce([m for m, _ in selected]))
+            result = analyze_mask(full_image, mask, crop_xyxy=roi,
+                                  score=float(np.mean([i['sam_score'] for _, i in selected])),
                                   inset_px=float(self.cfg.get_path('wire.inset_px', 12)))
         else:
-            blank = np.zeros(image.shape[:2], bool)
-            result = WireResult(image.copy(), blank, blank.copy(), np.empty((0, 2), int), [], 0, 0,
-                                [0, 0, image.shape[1], image.shape[0]], ['未分出线身；端子检测单独保留，可按R重新取景'])
+            blank = np.zeros(full_image.shape[:2], bool)
+            result = WireResult(full_image.copy(), blank, blank.copy(), np.empty((0, 2), int), [], 0, 0,
+                                list(roi), ['未分出线身；端子检测单独保留，可按R重新取景'])
         result.automation = {
             'method': self.generation_stats.get('method', 'line_prompts'), 'manual_prompts': False,
             'generated_masks': len(records), 'selected_masks': [info for _, info in selected],
             'sam_score_aggregation': 'mean_predicted_iou_of_selected_masks',
             'external_api_calls': 0,
+            'roi_xyxy_original_rgb': list(roi),
             'sampling': self.generation_stats,
             'timing_s': {'terminal': terminal_s, 'sam': sam_s},
         }

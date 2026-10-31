@@ -122,3 +122,32 @@ def confirm_boundary(result, point, cfg):
     apply_grasp_policy(updated, cfg, boundaries)
     result.grasp_policy, result.grasp_plans = updated.grasp_policy, updated.grasp_plans
     return chosen
+
+
+def confirm_body_boundary(result, point, cfg):
+    """人工确认线身掩码与金属的交界；不把自动排除的断口冒充物理线头。"""
+    from segmentation.wire import _end_region
+    point = np.asarray(point, dtype=float)
+    if point.shape != (2,) or not np.isfinite(point).all():
+        raise ValueError('交界点必须为有限像素坐标')
+    updated = copy.copy(result)
+    updated.candidates = copy.deepcopy(result.candidates)
+    updated.end_regions = list(result.end_regions)
+    for rejected in result.automation.get('rejected_geometric_ends', []):
+        if (rejected.get('rejection_reason') != 'image_line_continues_past_mask_tip'
+                or rejected.get('path_ambiguous')
+                or np.linalg.norm(np.asarray(rejected['tip_xy'])-point) > 12):
+            continue
+        if any(c.get('tip_xy') == rejected['tip_xy'] for c in updated.candidates):
+            continue
+        candidate = copy.deepcopy(rejected)
+        candidate.update(id=f'J{len(updated.candidates)+1}',
+                         kind='manually_confirmed_body_boundary_path',
+                         terminal_status='manual_boundary_not_terminal_tip',
+                         terminal_model_evidence=[], confirmed=False)
+        updated.candidates.append(candidate)
+        updated.end_regions.append(_end_region(result.mask, candidate['tip_xy'], 24))
+    chosen = confirm_boundary(updated, point, cfg)
+    result.candidates, result.end_regions = updated.candidates, updated.end_regions
+    result.grasp_policy, result.grasp_plans = updated.grasp_policy, updated.grasp_plans
+    return chosen
