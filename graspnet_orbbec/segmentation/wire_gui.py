@@ -30,6 +30,7 @@ class PromptState:
     result: object = None
     message: str = "拖框选择线材；左键补前景点，右键补背景点"
     camera_error: str = ""
+    offline_review: bool = False
 
     def invalidate(self):
         self.revision += 1
@@ -121,7 +122,9 @@ def panel_point(x, y, width, height, header=64):
 
 def render_canvas(live, state):
     h, w = live.shape[:2]
-    canvas = np.full((h + 174, w * 2, 3), 30, dtype=np.uint8)
+    from segmentation.grasp_v2_overlay import review_lines
+    details=review_lines(state.result) if state.result is not None else []
+    canvas = np.full((h + 174 + len(details)*25, w * 2, 3), 30, dtype=np.uint8)
     left = (state.source if state.source is not None else live).copy()
     if state.box is not None:
         cv2.rectangle(left, tuple(state.box[:2]), tuple(state.box[2:]), (255, 220, 0), 1)
@@ -133,17 +136,24 @@ def render_canvas(live, state):
     title = "识别原图（已冻结）" if state.source is not None else ("最近画面（取流中断）" if state.camera_error else "实时原图")
     put_cjk(canvas, title, (10, 30), size=20)
     put_cjk(canvas, "SAM2 掩码 / 端点 / 夹持中心预览（原图快照）", (w + 10, 30), size=18)
-    put_cjk(canvas, "R：自动识别 | Shift+左键：确认交界 | 拖框/点选纠正 | 空格/C：实时 | S：保存 | Q：退出", (10, h + 92), size=18)
+    controls=('离线：Shift交界 | T端子轮廓 / 右键撤点 / Enter闭合 | Y人工确认 | Z放大 | S保存 | R重识别 | Q退出'
+              if state.offline_review else 'R：自动识别 | Shift+左键：确认交界 | 拖框/点选纠正 | 空格/C：实时 | S：保存 | Q：退出')
+    put_cjk(canvas,controls,(10,h+92),size=15 if state.offline_review else 18)
     put_cjk(canvas, (state.camera_error or state.message)[:100], (10, h + 120), color=(0, 220, 255), size=18)
     warning = state.result.warnings[0] if state.result is not None and state.result.warnings else "A/B为几何候选；青色T为端子模型检测，仍需确认；仅输出二维像素位置"
     if state.result is not None and state.result.grasp_policy:
         offset = state.result.grasp_policy['offset_mm']
         warning = f'策略：交界后沿线身 {offset:g} mm；A/B为端点，粉色为交界，绿色为有尺度的夹持中心预览'
     put_cjk(canvas, warning[:100], (10, h + 151), color=(0, 190, 255), size=18)
+    for i,line in enumerate(details):
+        put_cjk(canvas,line,(10,h+182+i*25),color=(0,210,255),size=16)
     return canvas
 
 
-def run(cfg, args, input_channel, handeye_bridge=None):
+def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
+    if offline_session is not None:
+        # 离线分支在构造相机/工作线程之前返回，历史复核不会打开设备。
+        return offline_session.run_gui(render_canvas)
     cam = FileCamera(args.from_dir, loop=True) if args.from_dir else open_camera(cfg)
     state = PromptState()
     worker = SegmentationWorker(cfg)

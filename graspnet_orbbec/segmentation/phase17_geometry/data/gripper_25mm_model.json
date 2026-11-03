@@ -1,0 +1,44 @@
+{
+  "quality": "MODEL_DERIVED",
+  "physical_geometry_verified": false,
+  "jaw_width_m": 0.025,
+  "frame_id": "flange_link",
+  "units": "m",
+  "vertices": 135054,
+  "links": [
+    "flange_link",
+    "gripper_base",
+    "gripper_link1",
+    "gripper_link2"
+  ],
+  "includes_full_model_gripper": true,
+  "includes_camera_or_cables": false,
+  "sources": [
+    {
+      "link": "flange_link",
+      "path": "/home/ning/文档/ChatGPT/视觉/piper_x_phase1_20261031/offline_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_x/meshes/flange.stl",
+      "sha256": "f9ce752f93a6598858a779e3d8755a09e466b588efcffc3a1c3953773753a22b",
+      "vertices": 12270
+    },
+    {
+      "link": "gripper_base",
+      "path": "/home/ning/文档/ChatGPT/视觉/piper_x_phase1_20261031/offline_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/agx_gripper/meshes/gripper_base.stl",
+      "sha256": "0b839dc0bcb7d94e3422c74f6396b54a0441ba4836448ab5586e7f372d1bdbf3",
+      "vertices": 110268
+    },
+    {
+      "link": "gripper_link1",
+      "path": "/home/ning/文档/ChatGPT/视觉/piper_x_phase1_20261031/offline_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/agx_gripper/meshes/gripper_link1.stl",
+      "sha256": "475a7d8db056524d7659fadf5a2c307d62791047b6214d733dfc7846ed1c613d",
+      "vertices": 6258
+    },
+    {
+      "link": "gripper_link2",
+      "path": "/home/ning/文档/ChatGPT/视觉/piper_x_phase1_20261031/offline_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/agx_gripper/meshes/gripper_link2.stl",
+      "sha256": "3f88d534a85e28a33ef7d2061adacbd1d25214aa9325f9e464aad0f9e4b74606",
+      "vertices": 6258
+    }
+  ],
+  "mesh_data_sha256": "7f95abd6017165c3f957eeb565c8b7ee0305ad49795bf0d52c431fbe5ceb88e6",
+  "origin_model_sha256": "ebb1ed3b5a4e7a789a8b66e8bd56f55e84d8eb916f074eb996486412352428e5"
+}

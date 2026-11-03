@@ -1,0 +1,20 @@
+{
+  "version": "phase17-frozen-20261031",
+  "sources": [
+    {
+      "source": "/home/ning/文档/ChatGPT/视觉/piper_x_phase17_20261031/offline_coordinates/chain.py",
+      "source_sha256": "592384ff1fea78e97d02dc705bfa3315cf3bde9cf710c4c5eab25aba084911e8",
+      "copy": "chain.py",
+      "changes": "relative import and local config root only"
+    },
+    {
+      "source": "/home/ning/文档/ChatGPT/视觉/piper_x_phase17_20261031/phase17/policy.py",
+      "source_sha256": "f567e4251822248782e8dd02f165b558c4036fd3ccf2d785e4837e0e55adacf6",
+      "copy": "policy.py",
+      "changes": "relative import and local config root only"
+    }
+  ],
+  "boundary_source": "/home/ning/文档/ChatGPT/视觉/piper_x_phase17_20261031/phase17/integration.py",
+  "boundary_source_sha256": "2910dbbc126f6926f614658aaed12eb66fff3381a53db48a4c5211abcb4f16e2",
+  "originals_modified": false
+}

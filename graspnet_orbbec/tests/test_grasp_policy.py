@@ -231,4 +231,4 @@ def test_shift_click_confirms_boundary_without_restarting_segmentation(monkeypat
     assert gui.run(cfg,args,NS(stop_flag=False))==0
     assert calls==[True] and shown==[False,True]
     plan=next(p for p in original.grasp_plans if p['boundary_confirmed'])
-    assert plan['offset_mm']==10 and plan['status']=='metric_path_required'
+    assert plan['offset_mm']==14 and plan['status']=='metric_path_required'

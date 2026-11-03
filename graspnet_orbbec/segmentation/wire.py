@@ -40,6 +40,7 @@ class WireResult:
     terminal_masks: list[np.ndarray] = field(default_factory=list)
     grasp_policy: dict = field(default_factory=dict)
     grasp_plans: list[dict] = field(default_factory=list)
+    manual_terminal_annotations: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -53,6 +54,7 @@ class WireResult:
             "automation": self.automation,
             "terminal_detections": self.terminal_detections,
             "grasp_policy": self.grasp_policy, "grasp_plans": self.grasp_plans,
+            "manual_terminal_annotations": self.manual_terminal_annotations,
         }
 
 
@@ -378,6 +380,9 @@ def draw_result(result: WireResult) -> np.ndarray:
         x, y = np.rint(detection['bbox_xyxy'][:2]).astype(int)
         cv2.putText(vis, f"{detection['id']} {detection['confidence']:.2f}", (x + 12, max(15, y - 8)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1)
+    if result.manual_terminal_annotations or any(p.get('policy_version')=='wire-v2-total14mm' for p in result.grasp_plans):
+        from segmentation.grasp_v2_overlay import draw_review
+        vis=draw_review(vis,result)
     return vis
 
 

@@ -7,7 +7,9 @@
 
 ## 线材手眼联调
 
-已增加037K手眼结果绑定、只读RGB/法兰反馈配对、自动线身识别、交界后退10mm和基座坐标预览，并提供独立的离线规划及分步试验执行器。入口：`bash scripts/run_wire_grasp.sh audit`；操作、原厂夹爪名义参考和执行门槛见 [线材手眼联调](docs/WIRE_HANDEYE_TRIAL.md)。执行器默认不发送指令，尚未完成真实抓取验收。
+Piper X 当前为 **Phase 1.8离线准备，Phase 2 BLOCKED**。新预览从金属/绝缘原始交界总后退14mm，保留141.5mm名义TCP；完整夹爪模型投影与22mm接触带分开检查。原始分割和Shift交界确认保持，端子可用多边形人工标注并绑定原图哈希保存；人工标注不冒充自动检测或物理安全验收。
+
+新版文件图像入口：`python scripts/run_wire_offline.py --snapshot enabled --gui --out /tmp/wire_review_new`，另一张用`--snapshot raised`。用法、保存/重载与已知限制见 [Phase1.8离线复核](docs/WIRE_OFFLINE_PHASE18.md)。原10mm仅保留历史比较；旧手眼试验记录仍见 [线材手眼联调](docs/WIRE_HANDEYE_TRIAL.md)，不代表当前实机许可。事故锁、实机执行限制保持，不能由离线预览发运动指令。
 
 ## DaBai DC1
 

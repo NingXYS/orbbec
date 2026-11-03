@@ -6,7 +6,7 @@ import numpy as np
 
 
 def plan_candidate(candidate, boundary_xy, *, offset_mm=10, path_xyz_m=None, plane_normal=None):
-    """沿已定向中心线按米制弧长后退；三维路径须与inward_path_xy逐点对应。"""
+    """保留旧版计算供历史比较；新主流程14mm走plan_candidate_v2，均无执行授权。"""
     offset_mm = float(offset_mm)
     if not np.isfinite(offset_mm) or offset_mm <= 0:
         raise ValueError('夹持中心后退距离必须为正数，单位mm')
@@ -16,6 +16,9 @@ def plan_candidate(candidate, boundary_xy, *, offset_mm=10, path_xyz_m=None, pla
         'boundary_confirmed': False, 'boundary_xy': None, 'grasp_xy_preview': None,
         'grasp_camera_m': None, 'closing_direction_camera': None,
         'robot_pose_valid': False, 'tcp_compensation_applied': False,
+        'policy_version': 'legacy-comparison-only', 'validity': 'PREVIEW_ONLY',
+        'executable': False, 'planning_allowed': False,
+        'rejection_reasons': ['LEGACY_OFFSET_COMPARISON_ONLY'],
     }
     if boundary_xy is None:
         return dict(plan, status='boundary_required')
@@ -70,9 +73,52 @@ def plan_candidate(candidate, boundary_xy, *, offset_mm=10, path_xyz_m=None, pla
     return plan
 
 
+def plan_candidate_v2(candidate, boundary_xy, *, path_xyz_m=None, plane_normal=None,
+                      boundary_camera_m=None, input_quantity='original_camera_centerline'):
+    """复用固定Phase1.7弧长算法，从原始交界重算，禁止消费已偏移中心。"""
+    from segmentation.phase17_geometry.policy import select_center
+    from segmentation.phase17_geometry.boundary import project_boundary_to_path
+    plan = plan_candidate(candidate, boundary_xy, offset_mm=14)
+    plan.update(policy_version='wire-v2-total14mm', validity='PREVIEW_ONLY', executable=False,
+                planning_allowed=False, rejection_reasons=['METRIC_SCALE_MISSING'])
+    if plan['status'] != 'metric_path_required' or path_xyz_m is None:
+        return plan
+    if input_quantity != 'original_camera_centerline':
+        return dict(plan,status='rejected',validity='REJECTED',rejection_reasons=['OFFSET_ALREADY_APPLIED_OR_WRONG_ANCHOR'])
+    xyz=np.asarray(path_xyz_m,float)
+    path=np.asarray(candidate['inward_path_xy'],float)
+    if xyz.shape!=(len(path),3) or not np.isfinite(xyz).all() or np.any(xyz[:,2]<=0):
+        raise ValueError('米制相机路径必须与原图中心线对应，且为正Z有限Nx3')
+    index=plan['boundary_path_index']
+    if boundary_camera_m is None:
+        tail=xyz[index:];anchor={'quality':'MODEL_DERIVED_VERTEX_SNAP','physical_boundary_verified':False}
+    else:
+        tail,anchor=project_boundary_to_path(xyz,boundary_camera_m)
+    try:
+        selected=select_center(tail,anchor_kind='original_boundary',direction='toward_insulation',scale_evidence='MODEL_DERIVED')
+    except ValueError as e:
+        return dict(plan,status='insufficient_wire_length',validity='REJECTED',rejection_reasons=[str(e)])
+    center=np.asarray(selected['center_m']);tangent=np.asarray(selected['tangent'])
+    # 显示像素仅为路径插值；正式带标定预览由适配器使用Brown投影覆盖。
+    nearest=int(np.linalg.norm(xyz-center,axis=1).argmin())
+    plan.update(grasp_camera_m=center.tolist(),grasp_xy_preview=path[nearest].tolist(),
+                wire_tangent_camera=tangent.tolist(),selection_v2=selected,boundary_projection=anchor,
+                status='support_plane_required',rejection_reasons=['SUPPORT_PLANE_MISSING'])
+    if plane_normal is not None:
+        normal=np.array(plane_normal,float,copy=True)
+        if normal.shape!=(3,) or not np.isfinite(normal).all() or np.linalg.norm(normal)<1e-9:
+            raise ValueError('支撑面法向必须是有限非零三维向量')
+        normal/=np.linalg.norm(normal);closing=np.cross(normal,tangent)
+        if np.linalg.norm(closing)<1e-6:return dict(plan,status='wire_direction_inconsistent_with_plane')
+        closing/=np.linalg.norm(closing)
+        plan.update(closing_direction_camera=closing.tolist(),support_plane_normal=normal.tolist(),
+                    status='camera_frame_preview_ready',rejection_reasons=['TERMINAL_CONTOUR_REQUIRED','NOMINAL_TCP_NOT_PHYSICALLY_VERIFIED','PHASE2_BLOCKED'])
+    return plan
+
+
 def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
     """没有交界/真实三维路径时只记录待定位状态，不以像素冒充毫米。"""
-    offset = float(cfg.get_path('wire.grasp_policy.offset_mm', 10))
+    offset = float(cfg.get_path('wire.grasp_policy.offset_mm', 14))
     if not np.isfinite(offset) or offset <= 0:
         raise ValueError('夹持中心后退距离必须为正数，单位mm')
     boundaries, metric_paths = boundaries or {}, metric_paths or {}
@@ -82,14 +128,24 @@ def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
     plans = []
     for candidate in result.candidates:
         data = metric_paths.get(candidate['id'], {})
-        plans.append(plan_candidate(candidate, boundaries.get(candidate['id']), offset_mm=offset,
-                                    path_xyz_m=data.get('xyz_m'), plane_normal=data.get('plane_normal')))
+        if offset == 14:
+            plan=plan_candidate_v2(candidate,boundaries.get(candidate['id']),path_xyz_m=data.get('xyz_m'),
+                plane_normal=data.get('plane_normal'),boundary_camera_m=data.get('boundary_camera_m'),
+                input_quantity=data.get('input_quantity','original_camera_centerline'))
+        else:
+            plan=plan_candidate(candidate,boundaries.get(candidate['id']),offset_mm=offset,
+                path_xyz_m=data.get('xyz_m'),plane_normal=data.get('plane_normal'))
+            plan.update(policy_version='legacy-comparison-only',validity='PREVIEW_ONLY',executable=False,
+                        planning_allowed=False,rejection_reasons=['LEGACY_OFFSET_COMPARISON_ONLY','PHASE2_BLOCKED'])
+        plans.append(plan)
     result.grasp_policy = {
         'anchor': 'terminal_insulation_boundary', 'offset_mm': offset,
         'closing_rule': 'perpendicular_to_local_wire_tangent',
         'boundary_confirmation': 'manual_per_snapshot',
         'metric_source': 'aligned_camera_path_m',
         'robot_pose_valid': False, 'tcp_compensation_applied': False,
+        'policy_version': 'wire-v2-total14mm' if offset == 14 else 'legacy-comparison-only',
+        'motion_commands_enabled': False, 'executable': False, 'phase2': 'BLOCKED',
     }
     result.grasp_plans = plans
     return result

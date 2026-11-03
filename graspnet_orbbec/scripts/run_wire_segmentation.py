@@ -26,6 +26,8 @@ def main():
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--boundary", nargs=3, action="append", default=[], metavar=('ID','X','Y'),
                         help="人工确认候选的金属/绝缘交界；原图像素，可重复")
+    parser.add_argument('--offline-scene',type=Path,help='冻结坐标上下文；启用14mm/TCP/完整夹爪投影复核')
+    parser.add_argument('--terminal-annotation',type=Path,help='独立保存并绑定原图/实例的人工端子多边形')
     args = parser.parse_args()
     if args.auto and (args.box is not None or args.positive or args.negative):
         parser.error('--auto 不与手工框/点提示同时使用')
@@ -42,6 +44,16 @@ def main():
         result = Sam2WireSegmenter(cfg).segment(image, box=args.box, points=points, labels=labels)
     boundaries = {name: [float(x), float(y)] for name,x,y in args.boundary}
     apply_grasp_policy(result, cfg, boundaries)
+    from segmentation.grasp_v2 import FrozenScene,apply_preview
+    scene=FrozenScene.load(args.offline_scene) if args.offline_scene else None
+    annotation=None
+    if args.terminal_annotation:
+        from segmentation.terminal_annotation import load_annotation
+        plans=[p for p in result.grasp_plans if p.get('boundary_confirmed')]
+        if scene is None or len(plans)!=1:raise ValueError('端子标注需要冻结scene和唯一确认交界')
+        annotation=load_annotation(args.terminal_annotation,scene.image_path,result.image_bgr,result.mask,
+            candidate_id=plans[0]['candidate_id'],boundary_xy=plans[0]['boundary_input_xy'])
+    apply_preview(result,cfg,scene,annotation)
     save_result(result, args.out)
     print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
     print(f"已保存：{args.out.resolve()}")
