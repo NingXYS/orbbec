@@ -3,6 +3,10 @@
 
 # GraspNet + Orbbec RGB-D 相机
 
+## Piper X 当前真机入口
+
+官方启动脚本已统一到 `bash ../bringup/piper_x/start_real_control.sh`。采图、识别和MoveIt抓取适配仍在原位置，完整操作见 [真机启动手册](docs/REAL_GRASP_STARTUP.md)。旧“视觉”入口仅兼容转发；仿真和历史实验未迁移。
+
 当前默认相机为 **DaBai DC1**，保留 Gemini 336L 和 Astra Pro Plus 后端。GraspNet-baseline（SJTU, CVPR 2020）推理链路：对齐 RGB-D → 点云 → 6-DoF 抓取位姿 → 可视化。相机接入与推理入口不发送机械臂运动命令。
 
 ## 线材手眼联调
@@ -10,6 +14,23 @@
 Piper X 当前为 **Phase 1.8离线准备，Phase 2 BLOCKED**。新预览从金属/绝缘原始交界总后退14mm，保留141.5mm名义TCP；完整夹爪模型投影与22mm接触带分开检查。原始分割和Shift交界确认保持，端子可用多边形人工标注并绑定原图哈希保存；人工标注不冒充自动检测或物理安全验收。
 
 新版文件图像入口：`python scripts/run_wire_offline.py --snapshot enabled --gui --out /tmp/wire_review_new`，另一张用`--snapshot raised`。用法、保存/重载与已知限制见 [Phase1.8离线复核](docs/WIRE_OFFLINE_PHASE18.md)。原10mm仅保留历史比较；旧手眼试验记录仍见 [线材手眼联调](docs/WIRE_HANDEYE_TRIAL.md)，不代表当前实机许可。事故锁、实机执行限制保持，不能由离线预览发运动指令。
+
+视觉基座坐标到官方 MoveIt 的应用适配已新增：
+
+```bash
+recognition="output/wire_grasp/real_20261103_164546_base-12_grasp135_01/recognition.json"
+candidate_id="A"
+
+scripts/run_moveit_wire_grasp.sh \
+  --recognition "$recognition" \
+  --candidate-id "$candidate_id"
+```
+
+默认只规划；只有视觉目标、实测工具和执行安全检查全部通过后，才可使用 `--execute`。接口、门槛和当前阻塞见 [视觉坐标到官方MoveIt抓取适配](docs/MOVEIT_VISION_GRASP.md)。
+
+完整的双终端启动、采图、候选确认、手动使能、只规划和真机执行步骤见 [Piper X 视觉抓取真机启动手册](docs/REAL_GRASP_STARTUP.md)。
+
+当前支持固定桌面平面模式：使用 `configs/support_plane_piper_x_02.json` 后，新采图不再要求棋盘入镜。默认识别采用SAM2中心线并由操作者人工确认交界；YOLO端子检测默认仅作辅助证据。
 
 ## DaBai DC1
 
@@ -106,3 +127,5 @@ Astra Pro Plus **不在** OrbbecSDK_ROS2 v2 支持列表。本仓库使用 **PyO
 - [docs/moveit_safe_exec.md](docs/moveit_safe_exec.md) MoveIt 双位姿安全执行步骤
 - [docs/MoveIt双位姿验证记录_20260914.md](docs/MoveIt双位姿验证记录_20260914.md) 2026-09-14 真机双位姿验收记录
 - [docs/task3_closeout.md](docs/task3_closeout.md) 任务 3 结项（MoveIt 首次程序下发）
+
+迁移到其他电脑时的目录布局、环境与重新编译步骤见 [迁移路径说明](docs/PORTABLE_DEPLOYMENT.md)。

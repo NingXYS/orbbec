@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import cv2
@@ -23,6 +24,83 @@ def sha256(path):
 
 def image_digest(image):
     return hashlib.sha256(np.ascontiguousarray(image).tobytes()).hexdigest()
+
+
+def save_fixed_base_plane(bundle, snapshot, out, *, base_z_offset_m=0.0):
+    """用一次性棋盘快照保存base_link修正系下的支撑平面。"""
+    snapshot = Path(snapshot).resolve(strict=True)
+    if not np.isfinite(base_z_offset_m) or abs(base_z_offset_m) > .05:
+        raise ValueError('底座Z修正只接受±50mm内的有限米数')
+    bundle.check_camera(read_json(snapshot/'capture/camera.json'))
+    image = cv2.imread(str(snapshot/'capture/rgb.png'))
+    if image is None or image.shape[1::-1] != bundle.size:
+        raise ValueError('平面快照缺少匹配标定分辨率的RGB图像')
+    pair = read_json(snapshot/'pair.json')
+    if (pair.get('status') != 'paired_stationary'
+            or pair.get('calibration_sha256') != bundle.settings['sha256']
+            or pair.get('image_sha256') != sha256(snapshot/'capture/rgb.png')):
+        raise ValueError('平面快照配对或标定指纹不匹配')
+    t_base_flange = rigid_transform(pair['T_base_flange'])
+    correction = np.eye(4)
+    correction[2, 3] = float(base_z_offset_m)
+    t_base_rgb = correction @ t_base_flange @ bundle.t_flange_rgb
+    plane_camera = board_plane(image, bundle.k, bundle.d, bundle.session['board'])
+    normal_camera = np.asarray(plane_camera['normal_camera'], float)
+    origin_camera = np.asarray(plane_camera['origin_camera_m'], float)
+    normal_base = t_base_rgb[:3, :3] @ normal_camera
+    normal_base /= np.linalg.norm(normal_base)
+    origin_base = t_base_rgb[:3, :3] @ origin_camera + t_base_rgb[:3, 3]
+    payload = {
+        'schema_version': 1,
+        'frame_id': 'base_link',
+        'base_z_offset_m': float(base_z_offset_m),
+        'camera_serial': bundle.camera['serial'],
+        'handeye_sha256': bundle.settings['sha256'],
+        'normal_base': normal_base.tolist(),
+        'offset_base_m': float(normal_base @ origin_base),
+        'source_snapshot': str(snapshot),
+        'source_image_sha256': sha256(snapshot/'capture/rgb.png'),
+        'source_pair_base_flange': t_base_flange.tolist(),
+        'camera_plane': plane_camera,
+        'created_at': datetime.now(timezone.utc).isoformat(),
+        'operator_contract': 'table_and_robot_base_must_not_move',
+    }
+    target = Path(out)
+    if target.exists():
+        raise FileExistsError(f'固定平面文件已存在：{target}')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
+    return target
+
+
+def fixed_plane_in_camera(path, bundle, t_base_flange, *, base_z_offset_m):
+    settings = read_json(path)
+    correction = np.eye(4)
+    correction[2, 3] = float(base_z_offset_m)
+    if (settings.get('schema_version') != 1
+            or settings.get('frame_id') != 'base_link'
+            or settings.get('camera_serial') != bundle.camera['serial']
+            or settings.get('handeye_sha256') != bundle.settings['sha256']
+            or not np.isclose(float(settings.get('base_z_offset_m')), base_z_offset_m, atol=1e-9)):
+        raise ValueError('固定平面需要同一相机、手眼标定和底座Z修正')
+    normal_base = np.asarray(settings['normal_base'], float)
+    offset_base = float(settings['offset_base_m'])
+    if (normal_base.shape != (3,) or not np.isfinite(normal_base).all()
+            or abs(np.linalg.norm(normal_base) - 1) > 1e-6 or not np.isfinite(offset_base)):
+        raise ValueError('固定平面参数无效')
+    t_base_rgb = correction @ t_base_flange @ bundle.t_flange_rgb
+    t_rgb_base = np.linalg.inv(t_base_rgb)
+    normal_camera = t_rgb_base[:3, :3] @ normal_base
+    normal_camera /= np.linalg.norm(normal_camera)
+    point_base = normal_base * offset_base
+    origin_camera = t_rgb_base[:3, :3] @ point_base + t_rgb_base[:3, 3]
+    return {
+        'normal_camera': normal_camera.tolist(),
+        'origin_camera_m': origin_camera.tolist(),
+        'source': 'fixed_base_plane',
+        'source_snapshot': settings.get('source_snapshot'),
+        'base_z_offset_m': base_z_offset_m,
+    }
 
 
 class HandeyeBundle:
@@ -86,7 +164,8 @@ class HandeyeBundle:
 
 class WireHandeyeBridge:
     def __init__(self, bundle, snapshot, *, center_height_m=None,
-                 support_relation_confirmed=False, installation_confirmed=False, tool_file=None):
+                 support_relation_confirmed=False, installation_confirmed=False, tool_file=None,
+                 base_z_offset_m=0.0, fixed_plane_file=None):
         self.bundle, self.snapshot = bundle, Path(snapshot).resolve(strict=True)
         self.image = cv2.imread(str(self.snapshot/'capture/rgb.png'))
         if self.image is None or self.image.shape[1::-1] != bundle.size:
@@ -105,15 +184,24 @@ class WireHandeyeBridge:
             raise ValueError('快照位姿与原始反馈不一致')
         if center_height_m is not None and (not np.isfinite(center_height_m) or abs(center_height_m) > .05):
             raise ValueError('平面测试仅接受相对棋盘±50mm内的已测线材中心高度')
+        if not np.isfinite(base_z_offset_m) or abs(base_z_offset_m) > .05:
+            raise ValueError('底座Z修正只接受±50mm内的有限米数')
         self.height = center_height_m
+        self.base_z_offset_m = float(base_z_offset_m)
         self.support_confirmed = support_relation_confirmed
         self.installation_confirmed = installation_confirmed
         self.tool = read_json(tool_file) if tool_file else None
         self.plane_error = None
-        try:
-            self.plane = board_plane(self.image, bundle.k, bundle.d, bundle.session['board'])
-        except ValueError as exc:
-            self.plane, self.plane_error = None, str(exc)
+        if fixed_plane_file is not None:
+            self.plane = fixed_plane_in_camera(
+                fixed_plane_file, bundle, self.t_base_flange,
+                base_z_offset_m=self.base_z_offset_m,
+            )
+        else:
+            try:
+                self.plane = board_plane(self.image, bundle.k, bundle.d, bundle.session['board'])
+            except ValueError as exc:
+                self.plane, self.plane_error = None, str(exc)
 
     def apply(self, result, cfg):
         if image_digest(result.image_bgr) != image_digest(self.image):
@@ -149,14 +237,18 @@ class WireHandeyeBridge:
             if nominal:
                 blockers.append('nominal_finger_tip_reference_not_verified_grasp_center')
             tool_transform = rigid_transform(self.tool['T_flange_grasp'])
+        base_z_offset_m = getattr(self, 'base_z_offset_m', 0.0)
         for plan in result.grasp_plans:
             if plan['status'] != 'camera_frame_preview_ready':
                 continue
-            transformed = grasp_transforms(plan, self.t_base_flange @ self.bundle.t_flange_rgb,
+            base_correction = np.eye(4)
+            base_correction[2, 3] = base_z_offset_m
+            transformed = grasp_transforms(plan, base_correction @ self.t_base_flange @ self.bundle.t_flange_rgb,
                                             tool_transform)
             plan.update(transformed, status='base_frame_preview_ready',
                         metric_model='wire_center_parallel_to_current_board_plane',
                         center_height_over_board_m=self.height,
+                        base_z_offset_m=base_z_offset_m,
                         surface_projection_only=self.height is None or not self.support_confirmed,
                         readiness_blockers=list(blockers), robot_pose_valid=False,
                         executable=False)
@@ -165,6 +257,7 @@ class WireHandeyeBridge:
             robot_pose_valid=False, motion_commands_enabled=False,
             handeye=self.bundle.info(), support_plane=self.plane,
             support_plane_error=self.plane_error,
+            base_z_offset_m=base_z_offset_m,
             capture_snapshot=str(self.snapshot), readiness_blockers=blockers,
             interpretation='冻结快照的基座坐标预览；未检查碰撞/可达性，不能直接下发机器人')
         return result

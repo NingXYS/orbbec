@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "frame_id": "base_link",
+  "base_z_offset_m": -0.012,
+  "camera_serial": "CC1N162037K",
+  "handeye_sha256": {
+    "result": "ed1d981d430b2abd49bfd49b70764edfa4aa36e945d458eb95b68f6123fe4a09",
+    "camera": "66c492f3456db4c2d7aed234154b470b3f50795b5819114f5b98637625dadae2",
+    "session": "652d848387eb8e90105d85fae4d85dea8ba1bc8911283ec50101509c47b9aa2f"
+  },
+  "normal_base": [
+    0.017766843591169548,
+    0.02636153980869428,
+    0.9994945765174125
+  ],
+  "offset_base_m": -0.012609385402621022,
+  "source_snapshot": "/home/ning/orbbec/graspnet_orbbec/output/wire_grasp/real_20261103_202026",
+  "source_image_sha256": "2931b1b732d986a7baca3ac3e27c9403201ecbb6ec490a80bb061fdd26726031",
+  "source_pair_base_flange": [
+    [
+      -0.0998556659698915,
+      -0.7938264711150818,
+      0.5998903064150026,
+      0.100399
+    ],
+    [
+      -0.9921886472509567,
+      0.12474646969221137,
+      -8.102867917282362e-05,
+      -0.0073809999999999995
+    ],
+    [
+      -0.07476987521740364,
+      -0.5952124427935848,
+      -0.8000822543361823,
+      0.32486
+    ],
+    [
+      0.0,
+      0.0,
+      0.0,
+      1.0
+    ]
+  ],
+  "camera_plane": {
+    "normal_camera": [
+      -0.059949215808410776,
+      -0.3217510321820191,
+      -0.9449245286337751
+    ],
+    "origin_camera_m": [
+      -0.07425524921255809,
+      -0.05741035136167105,
+      0.3837749249595876
+    ],
+    "reprojection_rms_px": 0.22850041091442108,
+    "corner_count": 40,
+    "detector": "classic_subpixel",
+    "source": "current_raw_rgb_chessboard_pnp",
+    "depth_used": false
+  },
+  "created_at": "2026-11-03T13:13:04.619301+00:00",
+  "operator_contract": "table_and_robot_base_must_not_move"
+}

@@ -98,7 +98,10 @@ class SegmentationWorker(threading.Thread):
                         from segmentation.automatic import AutomaticWireRecognizer
                         self.auto_recognizer = AutomaticWireRecognizer(self.cfg, self.segmenter)
                     result = self.auto_recognizer.recognize(image)
-                    apply_grasp_policy(result, self.cfg)
+                    apply_grasp_policy(
+                        result, self.cfg,
+                        result.automation.get('terminal_boundary_suggestions', {}),
+                    )
                     self.results.put((revision, result, None))
                     continue
                 if target:
@@ -294,6 +297,9 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
                                 print(state.message, flush=True)
                         if result.automation:
                             state.message += f"；端子模型检出 {len(result.terminal_detections)} 个"
+                            guided = result.automation.get('terminal_guided_candidates', [])
+                            if guided:
+                                state.message += f"；YOLO自动交界 {','.join(guided)}"
                             print(f'本次自动识别 {result.elapsed_s:.3f}s；{result.automation.get("sampling", {}).get("seed_count", "?")} 个自动提示', flush=True)
                         for item in result.candidates:
                             print(f"端点{item['id']}: {item['tip_xy']} 像素；夹持中心策略为交界后退{result.grasp_policy['offset_mm']:g}mm（待确认交界/三维尺度）", flush=True)

@@ -11,7 +11,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from arm.handeye_bridge import HandeyeBundle, WireHandeyeBridge
+from arm.handeye_bridge import HandeyeBundle, WireHandeyeBridge, fixed_plane_in_camera
+from arm.stationary_capture import verify_pair_rgb_window
 from arm.wire_geometry import (board_plane, fit_pivot, flange_transform,
                                grasp_transforms, pixels_on_plane, rigid_transform)
 from common.config import Config
@@ -142,6 +143,59 @@ def test_bridge_refuses_unpaired_or_changed_image(bundle, tmp_path):
         WireHandeyeBridge(bundle, snap)
 
 
+def test_saved_base_plane_is_projected_into_current_camera(bundle, tmp_path):
+    path = tmp_path/'fixed_plane.json'
+    payload = {
+        'schema_version': 1,
+        'frame_id': 'base_link',
+        'base_z_offset_m': 0.0,
+        'camera_serial': 'TEST_ONLY',
+        'handeye_sha256': bundle.settings['sha256'],
+        'normal_base': [0, 0, 1],
+        'offset_base_m': 0.0,
+    }
+    path.write_text(json.dumps(payload))
+    t_base_flange = np.eye(4)
+    t_base_flange[2, 3] = 0.2
+    plane = fixed_plane_in_camera(path, bundle, t_base_flange, base_z_offset_m=0.0)
+    assert plane['normal_camera'] == pytest.approx([0, 0, 1])
+    assert plane['origin_camera_m'] == pytest.approx([0, 0, -0.2])
+    assert plane['source'] == 'fixed_base_plane'
+    with pytest.raises(ValueError, match='同一相机'):
+        fixed_plane_in_camera(path, bundle, t_base_flange, base_z_offset_m=-.012)
+
+
+def test_wire_pair_uses_rgb_receive_window_not_post_capture_jitter():
+    class Helper:
+        pose_to_base_gripper = staticmethod(lambda pose, convention: flange_transform(pose))
+
+        @staticmethod
+        def rotation_error_deg(left, right):
+            return float(np.rad2deg(np.linalg.norm(
+                cv2.Rodrigues(left @ right.T)[0])))
+
+    stable = [0.24, 0.0025, 0.246, 3.12, 0.006, 1.572]
+    jittered = [0.241, 0.00231, 0.245, 3.12147, 0.00021, 1.57207]
+    samples = []
+    for index in range(400):
+        pose = jittered if index >= 350 else stable
+        samples.append({
+            'pose_m_rad': pose,
+            'host_kernel_timestamp_s': 1000 + index * .005,
+        })
+    image_time = 1000 + 200 * .005
+    frames = {
+        'rgb': {'host_receive_timestamp_us': str(int(image_time * 1e6))},
+        'depth': {'host_receive_timestamp_us': str(int(image_time * 1e6))},
+    }
+    checked = verify_pair_rgb_window(
+        Helper, {'status': 'passed', 'samples': samples}, frames, {},
+    )
+    assert checked['stability_scope'] == 'rgb_receive_plus_minus_0.5s'
+    assert checked['translation_max_change_m'] == 0
+    assert checked['whole_window_rotation_max_change_deg'] > .1
+
+
 def make_preview_bridge(bundle):
     bridge = object.__new__(WireHandeyeBridge)
     bridge.bundle, bridge.snapshot = bundle, Path('/test_only_synthetic')
@@ -194,6 +248,29 @@ def test_measured_tool_produces_compensated_flange_preview_only(bundle):
     assert not plan['surface_projection_only']
     assert not plan['executable']
     assert not result.grasp_policy['motion_commands_enabled']
+
+
+def test_explicit_base_z_offset_moves_target_without_double_tool_compensation(bundle):
+    bridge = make_preview_bridge(bundle)
+    bridge.height, bridge.support_confirmed, bridge.installation_confirmed = .044, True, True
+    bridge.tool = {'verified': True, 'evidence': 'operator_measurement', 'camera_serial': 'TEST_ONLY',
+                   'frame_definition': 'x_closing_y_cross_z_approach',
+                   'T_flange_grasp': flange_transform([0, 0, .135, 0, 0, 0]).tolist()}
+    baseline = make_result(bridge.image)
+    apply_grasp_policy(baseline, Config({}), {'A': [320, 240]})
+    bridge.apply(baseline, Config({}))
+
+    bridge.base_z_offset_m = -.012
+    corrected = make_result(bridge.image)
+    apply_grasp_policy(corrected, Config({}), {'A': [320, 240]})
+    bridge.apply(corrected, Config({}))
+    baseline_plan, corrected_plan = baseline.grasp_plans[0], corrected.grasp_plans[0]
+    tool = flange_transform([0, 0, .135, 0, 0, 0])
+    assert corrected.grasp_policy['base_z_offset_m'] == pytest.approx(-.012)
+    assert np.asarray(corrected_plan['grasp_base_m'])[2] - np.asarray(
+        baseline_plan['grasp_base_m'])[2] == pytest.approx(-.012)
+    assert np.asarray(corrected_plan['T_base_flange_grasp']) @ tool == pytest.approx(
+        np.asarray(corrected_plan['T_base_grasp']), abs=1e-9)
 
 
 def test_ambiguous_and_unconfirmed_candidates_stay_unlocalized(bundle):

@@ -14,7 +14,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from arm.handeye_bridge import HandeyeBundle, WireHandeyeBridge, read_json
+from arm.handeye_bridge import (HandeyeBundle, WireHandeyeBridge, read_json,
+                                save_fixed_base_plane)
 from arm.wire_geometry import board_plane, fit_pivot, flange_transform
 from common.config import load_config
 
@@ -28,6 +29,10 @@ def parser():
     check = commands.add_parser('check-plane', help='只验证相机原图的棋盘平面，不生成抓取或机器人位姿')
     check.add_argument('--capture', type=Path, required=True)
     check.add_argument('--out', type=Path, required=True)
+    fixed = commands.add_parser('save-fixed-plane', help='从仅含完整棋盘的停稳快照保存固定桌面平面')
+    fixed.add_argument('--snapshot', type=Path, required=True)
+    fixed.add_argument('--out', type=Path, required=True)
+    fixed.add_argument('--base-z-offset-mm', type=float, default=0.0)
     capture = commands.add_parser('capture', help='停稳后采RGB/被动法兰反馈，不发送机器人命令')
     capture.add_argument('--out', type=Path)
     for command in ('preview', 'recognize'):
@@ -40,6 +45,9 @@ def parser():
         sub.add_argument('--same-installation-confirmed', action='store_true',
                          help='确认同一标定机械臂/相机安装未变')
         sub.add_argument('--tool', type=Path, help='实测夹持中心与工具坐标轴文件')
+        sub.add_argument('--fixed-plane', type=Path, help='已保存的base_link固定桌面平面')
+        sub.add_argument('--base-z-offset-mm', type=float, default=0.0,
+                         help='机器人base_link相对桌面的Z修正；桌面低于base_link时填负值')
         sub.add_argument('--boundary', nargs=3, action='append', default=[], metavar=('ID', 'X', 'Y'),
                          help='本快照人工确认的金属/绝缘交界，可重复')
         sub.add_argument('--roi', nargs=4, type=int, metavar=('X1', 'Y1', 'X2', 'Y2'),
@@ -79,6 +87,14 @@ def main():
             json.dump(report, out, ensure_ascii=False, indent=2)
         print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
+    if args.command == 'save-fixed-plane':
+        target = save_fixed_base_plane(
+            bundle, args.snapshot, args.out,
+            base_z_offset_m=args.base_z_offset_mm/1000,
+        )
+        print(json.dumps(read_json(target), ensure_ascii=False, indent=2))
+        print(f'固定平面已保存：{target}')
+        return 0
     if args.command == 'capture':
         from arm.stationary_capture import capture_snapshot
         out = args.out or ROOT/'output/wire_grasp'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -107,7 +123,9 @@ def main():
     bridge = WireHandeyeBridge(bundle, args.snapshot,
                               center_height_m=None if args.center_height_mm is None else args.center_height_mm/1000,
                               support_relation_confirmed=args.support_relation_confirmed,
-                              installation_confirmed=args.same_installation_confirmed, tool_file=args.tool)
+                              installation_confirmed=args.same_installation_confirmed, tool_file=args.tool,
+                              base_z_offset_m=args.base_z_offset_mm/1000,
+                              fixed_plane_file=args.fixed_plane)
     cfg = load_config(args.config)
     cfg['camera']['serial'] = bundle.camera['serial']
     if args.roi is not None:
@@ -117,7 +135,8 @@ def main():
         from segmentation.grasp_policy import apply_grasp_policy, confirm_body_boundary
         from segmentation.wire import save_result
         result = AutomaticWireRecognizer(cfg).recognize(bridge.image)
-        boundaries = {name: [float(x), float(y)] for name, x, y in args.boundary}
+        boundaries = dict(result.automation.get('terminal_boundary_suggestions', {}))
+        boundaries.update({name: [float(x), float(y)] for name, x, y in args.boundary})
         apply_grasp_policy(result, cfg, boundaries)
         for point in args.boundary_point:
             confirm_body_boundary(result, point, cfg)

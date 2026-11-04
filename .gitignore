@@ -20,3 +20,4 @@ output/
 *.key
 *.pem
 secrets/
+agilex_official_ws/

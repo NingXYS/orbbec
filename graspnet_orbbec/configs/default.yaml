@@ -124,4 +124,7 @@ wire:
     terminal_class_ids: [0]
     terminal_label: 线材金属端子
     terminal_confidence: 0.4
+    terminal_path_max_distance_px: 12
+    terminal_auto_boundary: false
+    terminal_use_seeds: false
 

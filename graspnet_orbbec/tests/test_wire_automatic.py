@@ -11,7 +11,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from common.config import Config
-from segmentation.automatic import AutomaticWireRecognizer, attach_terminals, select_wire_masks, automatic_line_seeds, prune_continuing_endpoints
+from segmentation.automatic import (AutomaticWireRecognizer, attach_terminal_guided_boundaries,
+                                    attach_terminals, select_wire_masks, automatic_line_seeds,
+                                    prune_continuing_endpoints)
 from segmentation.wire import SegmentationError, analyze_mask, save_result
 from segmentation.wire_gui import PromptState, SegmentationWorker
 
@@ -129,6 +131,28 @@ def test_terminal_evidence_only_attaches_to_overlapping_end():
     assert not result.to_dict()['terminal_semantics_verified']
 
 
+def test_yolo_terminal_mask_creates_boundary_candidate_on_main_centerline():
+    image, mask = scene()
+    result = analyze_mask(image, mask)
+    result.candidates, result.end_regions = [], []
+    terminal = np.zeros_like(mask)
+    terminal[176:184, 296:306] = True
+    result.terminal_detections = [{
+        'id': 'T1', 'confidence': .88, 'bbox_xyxy': [296, 176, 306, 184],
+        'mask_file': 'terminal_T1.png',
+    }]
+    result.terminal_masks = [terminal]
+    suggestions = attach_terminal_guided_boundaries(result, Config())
+    assert len(suggestions) == 1
+    candidate = result.candidates[0]
+    assert candidate['kind'] == 'terminal_model_guided_boundary_path'
+    assert candidate['terminal_status'] == 'model_detected'
+    assert candidate['confirmed'] is True
+    assert candidate['terminal_model_evidence'][0]['id'] == 'T1'
+    assert np.linalg.norm(np.asarray(candidate['tip_xy']) - [301, 180]) <= 8
+    assert len(candidate['inward_path_xy']) >= 12
+
+
 def test_auto_pipeline_needs_no_box_points_or_network(tmp_path):
     image, mask = scene()
     recognizer = AutomaticWireRecognizer(Config())
@@ -141,6 +165,7 @@ def test_auto_pipeline_needs_no_box_points_or_network(tmp_path):
     assert result.automation['manual_prompts'] is False
     assert result.automation['external_api_calls'] == 0
     assert result.automation['terminal_status'] == 'ok'
+    assert result.automation['terminal_boundary_suggestions'] == {}
     assert len(result.terminal_masks) == 1
     save_result(result, tmp_path/'auto')
     assert np.array_equal(cv2.imread(str(tmp_path/'auto/terminal_T1.png'), 0)>0, terminal_mask)

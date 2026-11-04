@@ -1,5 +1,9 @@
 # Orbbec RGB-D Manipulation Stack
 
+## Piper X 当前真机入口
+
+官方启动脚本已统一到 `bash bringup/piper_x/start_real_control.sh`。采图、识别和MoveIt抓取适配仍在原位置，完整操作见 [真机启动手册](graspnet_orbbec/docs/REAL_GRASP_STARTUP.md)。旧“视觉”入口仅兼容转发；仿真和历史实验未迁移。
+
 > **RGB-D Perception · GraspNet · SAM2 / YOLO · VLM Grounding · 3D Localization · MoveIt 2 · Real Robot Validation**
 
 一个面向真实机器人抓取与操作场景的 RGB-D 感知与执行工程：从 Orbbec 深度相机取流、RGB-D 对齐、点云与 6-DoF 抓取候选，到 VLM 目标定位、线材分割与夹持策略，再到 MoveIt 2 双臂安全执行验证。
@@ -354,3 +358,5 @@ The repository deliberately keeps these boundaries explicit rather than hiding t
 ## Security
 
 Keep cloud credentials in environment variables or local secret files excluded from Git. Never commit API keys.
+
+迁移到其他电脑时的目录布局、环境与重新编译步骤见 [迁移路径说明](graspnet_orbbec/docs/PORTABLE_DEPLOYMENT.md)。

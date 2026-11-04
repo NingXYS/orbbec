@@ -63,6 +63,22 @@ def test_manual_boundary_does_not_restore_ambiguous_seams_or_mutate_on_error():
     assert not result.candidates and not result.grasp_plans
 
 
+def test_manual_boundary_can_start_from_interior_of_main_centerline():
+    image = np.full((100, 200, 3), 160, np.uint8)
+    mask = np.zeros((100, 200), np.uint8)
+    cv2.line(mask, (20, 50), (180, 50), 1, 3)
+    result = analyze_mask(image, mask)
+    result.candidates, result.end_regions = [], []
+    apply_grasp_policy(result, Config({}))
+    chosen = confirm_body_boundary(result, [110, 52], Config({}))
+    candidate = next(c for c in result.candidates if c['id'] == chosen)
+    assert candidate['kind'] == 'manual_main_path_boundary'
+    assert candidate['confirmed'] is True
+    plan = next(p for p in result.grasp_plans if p['candidate_id'] == chosen)
+    assert plan['boundary_confirmed'] is True
+    assert plan['boundary_input_xy'] == pytest.approx([110, 50])
+
+
 def test_confirmed_boundary_does_not_turn_pixels_into_millimeters():
     candidate, _ = straight()
     plan = plan_candidate(candidate,[45,50])

@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "camera_serial": "CC1N162037K",
+  "robot_model": "PIPER X",
+  "effector": "official_agx_gripper_with_original_fingers",
+  "verified": true,
+  "verification": "operator_authorized_contact_depth",
+  "frame_definition": "x_closing_y_cross_z_approach",
+  "reference_point": "grasp_center_7_5mm_behind_measured_tip_plane",
+  "T_flange_grasp": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0.135], [0, 0, 0, 1]],
+  "evidence": "游标卡尺测得法兰到夹爪末端为142.5mm；用户指定实际夹持中心深度为135mm。",
+  "limitations": [
+    "该文件使用操作者指定的135mm夹持中心，不是独立计量验收的TCP",
+    "若夹指安装或夹持面改变，必须重新测量"
+  ]
+}

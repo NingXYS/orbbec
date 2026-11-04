@@ -12,7 +12,8 @@ import numpy as np
 
 from common.config import load_config
 from common.paths import ROOT
-from segmentation.wire import Sam2WireSegmenter, SegmentationError, WireResult, analyze_mask
+from segmentation.wire import (Sam2WireSegmenter, SegmentationError, WireResult,
+                               _end_region, analyze_mask)
 
 
 def line_contrast(image, cfg):
@@ -77,7 +78,8 @@ def prune_continuing_endpoints(result, cfg):
         if not candidate.get('terminal_model_evidence') and len(hits) >= 3 and np.mean(hits) >= .6:
             rejected.append(dict(candidate, rejection_reason='image_line_continues_past_mask_tip'))
             continue
-        candidate['id'] = chr(65+len(candidates)) if len(candidates)<26 else f'E{len(candidates)+1}'
+        if candidate.get('kind') != 'terminal_model_guided_boundary_path':
+            candidate['id'] = chr(65+len(candidates)) if len(candidates)<26 else f'E{len(candidates)+1}'
         candidates.append(candidate)
         regions.append(region)
     result.candidates, result.end_regions = candidates, regions
@@ -151,6 +153,103 @@ def attach_terminals(result, detections, masks):
         result.warnings.append('部分几何端部没有端子模型支持，不能将它们全部视为已识别端子')
 
 
+def _path_length(path):
+    points = np.asarray(path, dtype=float)
+    if len(points) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+
+
+def attach_terminal_guided_boundaries(result, cfg):
+    """用YOLO端子掩码在主中心线上定位交界，不要求它与几何端部区域重叠。"""
+    suggestions = {}
+    max_distance = float(cfg.get_path('wire.auto.terminal_path_max_distance_px', 12))
+    if max_distance <= 0:
+        raise ValueError('terminal_path_max_distance_px 必须为正数')
+    inset = float(cfg.get_path('wire.inset_px', 12))
+    used_ids = {candidate['id'] for candidate in result.candidates}
+    for detection, terminal_mask in zip(result.terminal_detections, result.terminal_masks):
+        mask = np.asarray(terminal_mask, dtype=bool)
+        if not mask.any():
+            continue
+        ty, tx = np.where(mask)
+        terminal_points = np.c_[tx, ty].astype(float)
+        best = None
+        for local_index, path in enumerate(result.paths_xy):
+            points = np.asarray(path, dtype=float)
+            if len(points) < int(2 * inset + 5):
+                continue
+            delta = terminal_points[:, None, :] - points[None, :, :]
+            distances = np.linalg.norm(delta, axis=2)
+            terminal_index, path_index = np.unravel_index(
+                int(np.argmin(distances)), distances.shape)
+            distance = float(distances[terminal_index, path_index])
+            if best is None or distance < best[0]:
+                best = (distance, local_index, path, int(path_index))
+        if best is None or best[0] > max_distance:
+            continue
+        distance, path_index, path, boundary_index = best
+        boundary = np.asarray(path[boundary_index], dtype=float)
+        # 已有几何端点就在端子交界处时不重复造候选。
+        if any(
+            candidate.get('inward_path_xy')
+            and np.min(np.linalg.norm(
+                np.asarray(candidate['inward_path_xy'], dtype=float) - boundary, axis=1)) <= 6
+            for candidate in result.candidates
+        ):
+            continue
+        left = path[:boundary_index + 1][::-1]
+        right = path[boundary_index:]
+        inward = left if _path_length(left) >= _path_length(right) else right
+        if len(inward) < int(inset + 5):
+            continue
+        distances = np.r_[0.0, np.linalg.norm(np.diff(inward, axis=0), axis=1).cumsum()]
+        near_index = min(int(np.searchsorted(distances, inset)), len(inward) - 1)
+        a, b = max(0, near_index - 5), min(len(inward) - 1, near_index + 5)
+        tangent = np.asarray(inward[b], dtype=float) - np.asarray(inward[a], dtype=float)
+        norm = float(np.linalg.norm(tangent))
+        if norm <= 0:
+            continue
+        sequence = 1
+        candidate_id = f'Y{sequence}'
+        while candidate_id in used_ids:
+            sequence += 1
+            candidate_id = f'Y{sequence}'
+        used_ids.add(candidate_id)
+        evidence = {
+            'id': detection['id'],
+            'confidence': detection['confidence'],
+            'bbox_xyxy': detection['bbox_xyxy'],
+            'association': 'nearest_main_centerline_to_terminal_mask',
+            'path_distance_px': distance,
+        }
+        region = _end_region(result.mask, np.rint(boundary).astype(int), 2 * inset)
+        result.candidates.append({
+            'id': candidate_id,
+            'component_id': path_index,
+            'tip_xy': np.rint(boundary).astype(int).tolist(),
+            'near_tip_xy': np.asarray(inward[near_index], dtype=int).tolist(),
+            'tangent_xy': (tangent / norm).tolist(),
+            'inward_path_xy': np.asarray(inward, dtype=int).tolist(),
+            'path_ambiguous': False,
+            'inset_px': float(distances[near_index]),
+            'end_region_pixels': int(region.sum()),
+            'end_region_extent_px': float(2 * inset),
+            'kind': 'terminal_model_guided_boundary_path',
+            'confirmed': True,
+            'terminal_model_evidence': [evidence],
+            'terminal_status': 'model_detected',
+            'boundary_confirmation': 'terminal_model_guided_nearest_path',
+        })
+        result.end_regions.append(region)
+        suggestions[candidate_id] = boundary.tolist()
+        detection['guided_candidate_id'] = candidate_id
+        detection['boundary_xy'] = boundary.tolist()
+    result.automation['terminal_boundary_suggestions'] = suggestions
+    result.automation['terminal_guided_candidates'] = list(suggestions)
+    return suggestions
+
+
 class AutomaticWireRecognizer:
     def __init__(self, cfg=None, segmenter=None):
         self.cfg = cfg if cfg is not None else load_config()
@@ -188,7 +287,12 @@ class AutomaticWireRecognizer:
         amp = (torch.autocast('cuda', dtype=torch.bfloat16)
                if self.segmenter.device == 'cuda' and torch.cuda.is_bf16_supported() else nullcontext())
         if self.cfg.get_path('wire.auto.method', 'line_prompts') != 'dense':
-            points, capped = automatic_line_seeds(image, self.cfg, self.terminal_seed_points)
+            extra_points = (
+                self.terminal_seed_points
+                if self.cfg.get_path('wire.auto.terminal_use_seeds', False)
+                else []
+            )
+            points, capped = automatic_line_seeds(image, self.cfg, extra_points)
             self.generation_stats = {'method': 'line_prompts', 'seed_count': len(points),
                                      'seed_budget_reached': capped, 'seed_points_xy': points.tolist()}
             if not len(points):
@@ -289,11 +393,12 @@ class AutomaticWireRecognizer:
             except Exception as exc:
                 terminal_error = str(exc)
         self.terminal_seed_points = []
-        for mask in terminal_masks:
-            dt = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
-            if dt.any():
-                y, x = np.unravel_index(dt.argmax(), dt.shape)
-                self.terminal_seed_points.append([int(x), int(y)])
+        if self.cfg.get_path('wire.auto.terminal_use_seeds', False):
+            for mask in terminal_masks:
+                dt = cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)
+                if dt.any():
+                    y, x = np.unravel_index(dt.argmax(), dt.shape)
+                    self.terminal_seed_points.append([int(x), int(y)])
         terminal_s = time.perf_counter() - start
         records = self._generate(image)
         sam_s = time.perf_counter() - start - terminal_s
@@ -329,6 +434,8 @@ class AutomaticWireRecognizer:
             'sampling': self.generation_stats,
             'timing_s': {'terminal': terminal_s, 'sam': sam_s},
         }
+        result.automation['terminal_boundary_suggestions'] = {}
+        result.automation['terminal_guided_candidates'] = []
         result.warnings.append('自动线状候选不代表已确认线材类别；遮挡/粘连处不保证分实例')
         if self.generation_stats.get('seed_budget_reached'):
             result.warnings.append('本帧达到自动提示预算，可能漏检；可补点或增加max_seeds')
@@ -338,6 +445,8 @@ class AutomaticWireRecognizer:
         if terminal_enabled:
             if terminal_error is None:
                 attach_terminals(result, detections, terminal_masks)
+                if self.cfg.get_path('wire.auto.terminal_auto_boundary', False):
+                    attach_terminal_guided_boundaries(result, self.cfg)
                 result.automation['terminal_status'] = 'ok'
             else:
                 result.automation['terminal_status'] = 'unavailable'

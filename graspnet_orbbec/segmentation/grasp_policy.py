@@ -189,7 +189,12 @@ def confirm_body_boundary(result, point, cfg):
     updated = copy.copy(result)
     updated.candidates = copy.deepcopy(result.candidates)
     updated.end_regions = list(result.end_regions)
+    manual_fallback_blocked = False
     for rejected in result.automation.get('rejected_geometric_ends', []):
+        if (np.linalg.norm(np.asarray(rejected['tip_xy'])-point) <= 12
+                and (rejected.get('rejection_reason') != 'image_line_continues_past_mask_tip'
+                     or rejected.get('path_ambiguous'))):
+            manual_fallback_blocked = True
         if (rejected.get('rejection_reason') != 'image_line_continues_past_mask_tip'
                 or rejected.get('path_ambiguous')
                 or np.linalg.norm(np.asarray(rejected['tip_xy'])-point) > 12):
@@ -203,7 +208,64 @@ def confirm_body_boundary(result, point, cfg):
                          terminal_model_evidence=[], confirmed=False)
         updated.candidates.append(candidate)
         updated.end_regions.append(_end_region(result.mask, candidate['tip_xy'], 24))
-    chosen = confirm_boundary(updated, point, cfg)
+    # 真实端子交界常位于主中心线中部而非几何端点；人工点到主路径附近时，
+    # 直接从该路径点沿较长一侧生成候选，避免强迫用户点击错误的块体端点。
+    if not manual_fallback_blocked and not any(
+        np.min(np.linalg.norm(
+            np.asarray(candidate.get('inward_path_xy', [[np.inf, np.inf]]), float) - point,
+            axis=1,
+        )) <= 12
+        for candidate in updated.candidates
+    ):
+        best = None
+        for component_id, path in enumerate(result.paths_xy):
+            points = np.asarray(path, float)
+            if len(points) < 2:
+                continue
+            distances = np.linalg.norm(points - point, axis=1)
+            index = int(distances.argmin())
+            if best is None or distances[index] < best[0]:
+                best = (float(distances[index]), component_id, points, index)
+        if best is not None and best[0] <= 12:
+            _, component_id, points, index = best
+            left, right = points[:index + 1][::-1], points[index:]
+            def length(path):
+                return float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
+            inward = left if length(left) >= length(right) else right
+            if len(inward) >= 17:
+                inset = float(cfg.get_path('wire.inset_px', 12))
+                distances = np.r_[0.0, np.linalg.norm(np.diff(inward, axis=0), axis=1).cumsum()]
+                near_index = min(int(np.searchsorted(distances, inset)), len(inward) - 1)
+                a, b = max(0, near_index - 5), min(len(inward) - 1, near_index + 5)
+                tangent = inward[b] - inward[a]
+                norm = float(np.linalg.norm(tangent))
+                if norm > 0:
+                    candidate_id = f'M{len(updated.candidates) + 1}'
+                    while any(c['id'] == candidate_id for c in updated.candidates):
+                        candidate_id += 'M'
+                    boundary = points[index]
+                    candidate = {
+                        'id': candidate_id,
+                        'component_id': component_id,
+                        'tip_xy': np.rint(boundary).astype(int).tolist(),
+                        'near_tip_xy': np.asarray(inward[near_index], dtype=int).tolist(),
+                        'tangent_xy': (tangent / norm).tolist(),
+                        'inward_path_xy': np.asarray(inward, dtype=int).tolist(),
+                        'path_ambiguous': False,
+                        'inset_px': float(distances[near_index]),
+                        'end_region_pixels': 0,
+                        'end_region_extent_px': float(2 * inset),
+                        'kind': 'manual_main_path_boundary',
+                        'confirmed': True,
+                        'terminal_status': 'manual_boundary_on_main_path',
+                        'terminal_model_evidence': [],
+                    }
+                    updated.candidates.append(candidate)
+                    updated.end_regions.append(
+                        _end_region(result.mask, np.rint(boundary).astype(int), 2 * inset)
+                    )
+                    point = boundary
+    chosen = confirm_boundary(updated, np.asarray(point, float), cfg)
     result.candidates, result.end_regions = updated.candidates, updated.end_regions
     result.grasp_policy, result.grasp_plans = updated.grasp_policy, updated.grasp_plans
     return chosen
