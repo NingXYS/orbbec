@@ -1,10 +1,13 @@
 # Piper X 官方真机启动入口
 
-从 `orbbec` 根目录运行：
+当前电脑从任意目录打开终端后运行（迁移后按实际位置调整 `~/orbbec`）：
 
 ```bash
+cd ~/orbbec
 bash bringup/piper_x/start_real_control.sh
 ```
+
+启动前按手册第0节检查CAN。接口缺失或未启用时，本入口会提示并退出，不自动配置CAN。
 
 本入口会启动连接真机的官方驱动、MoveIt和RViz。启动参数与迁移前一致：`auto_enable=false`、5%速度、官方控制门控、ROS domain 93及单实例锁。只有现场准备完成后才人工启动。
 

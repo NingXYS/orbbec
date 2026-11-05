@@ -1,36 +1,95 @@
 """本地自动线材候选与端子模型辅助识别；不依赖手工框或云端服务。"""
 
 from contextlib import nullcontext
+import json
 import os
 from pathlib import Path
 import sys
 import threading
 import time
+import uuid
 
 import cv2
 import numpy as np
 
-from common.config import load_config
+from common.config import Config, load_config
 from common.paths import ROOT
 from segmentation.wire import (Sam2WireSegmenter, SegmentationError, WireResult,
-                               _end_region, analyze_mask)
+                               _end_region, analyze_mask, analyze_instance_masks)
 
 
-def line_contrast(image, cfg):
+def line_contrast(image, cfg, search_mask=None):
+    """局部明暗对比；可选掩码只限定阈值统计，不改动输入图像。"""
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     size = max(9, int(min(gray.shape) * 0.035) | 1)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (size, size))
     contrast = np.maximum(cv2.morphologyEx(gray, cv2.MORPH_BLACKHAT, kernel),
                           cv2.morphologyEx(gray, cv2.MORPH_TOPHAT, kernel))
-    threshold = max(float(cfg.get_path('wire.auto.min_contrast', 12)), float(np.percentile(contrast, 85)))
+    values = contrast if search_mask is None else contrast[search_mask]
+    threshold = max(float(cfg.get_path('wire.auto.min_contrast', 12)),
+                    float(np.percentile(values, 85)) if values.size else 0.0)
     return contrast, threshold
 
 
-def automatic_line_seeds(image, cfg, extra_points=()):
-    """从局部明暗细线提取稀疏提示，按连通段轮流采样，避免大线束独占预算。"""
+def seed_search_mask(shape, cfg, roi_xyxy=None):
+    """将配置中的半开矩形投到ROI；返回仅供正点采样使用的搜索掩码。"""
+    h, w = shape[:2]
+    roi = [0, 0, w, h] if roi_xyxy is None else list(roi_xyxy)
+    if (len(roi) != 4 or any(type(v) is not int for v in roi)
+            or roi[0] < 0 or roi[1] < 0 or roi[2] - roi[0] != w or roi[3] - roi[1] != h):
+        raise ValueError('种子ROI必须是与局部图像尺寸一致的原图整数xyxy')
+    enabled = cfg.get_path('wire.auto.seed_filter.enabled', False)
+    if type(enabled) is not bool:
+        raise ValueError('seed_filter.enabled必须为布尔值')
+    info = {'filter_enabled': enabled, 'roi_xyxy_original_rgb': roi,
+            'search_regions_roi_xyxy': None, 'exclude_regions_roi_xyxy': []}
+    if not enabled:
+        return np.ones((h, w), bool), info
+    frame = cfg.get_path('wire.auto.seed_filter.coordinate_space', 'original_rgb')
+    if frame not in ('original_rgb', 'roi'):
+        raise ValueError('种子区域coordinate_space只支持original_rgb或roi')
+
+    def rectangles(value, *, allow_null=False):
+        if value is None and allow_null:
+            return None
+        if not isinstance(value, (list, tuple)):
+            raise ValueError('种子区域必须是整数xyxy矩形列表')
+        output = []
+        dx, dy = roi[:2] if frame == 'original_rgb' else (0, 0)
+        for rect in value:
+            if (not isinstance(rect, (list, tuple)) or len(rect) != 4
+                    or any(type(v) is not int for v in rect)
+                    or rect[0] > rect[2] or rect[1] > rect[3]):
+                raise ValueError('种子区域必须是有序的整数xyxy矩形')
+            x1, y1, x2, y2 = rect
+            clipped = [max(0, min(w, x1-dx)), max(0, min(h, y1-dy)),
+                       max(0, min(w, x2-dx)), max(0, min(h, y2-dy))]
+            output.append(clipped)
+        return output
+
+    search = rectangles(cfg.get_path('wire.auto.seed_filter.search_regions', None), allow_null=True)
+    excluded = rectangles(cfg.get_path('wire.auto.seed_filter.exclude_regions', []))
+    allowed = np.ones((h, w), bool) if search is None else np.zeros((h, w), bool)
+    for x1, y1, x2, y2 in search or []:
+        allowed[y1:y2, x1:x2] = True
+    before = int(allowed.sum())
+    for x1, y1, x2, y2 in excluded:
+        allowed[y1:y2, x1:x2] = False
+    info.update(region_coordinate_space=frame, search_regions_roi_xyxy=search,
+                exclude_regions_roi_xyxy=excluded, search_pixels_before_exclusion=before)
+    return allowed, info
+
+
+def automatic_line_seeds(image, cfg, extra_points=(), *, roi_xyxy=None, diagnostics=None):
+    """生成ROI局部正点；关闭区域过滤时保留原采样，诊断同时提供完整RGB坐标。"""
     from skimage.morphology import skeletonize
-    contrast, threshold = line_contrast(image, cfg)
+    allowed, info = seed_search_mask(image.shape, cfg, roi_xyxy)
+    enabled = info['filter_enabled']
+    contrast, threshold = line_contrast(image, cfg, allowed if enabled else None)
     binary = (contrast >= threshold).astype(np.uint8)
+    before = int(binary.sum())
+    if enabled:
+        binary[~allowed] = 0
     count, labels, stats, _ = cv2.connectedComponentsWithStats(binary, 8)
     valid = [i for i in range(1, count) if stats[i, cv2.CC_STAT_AREA] >= 16]
     skeleton = skeletonize(np.isin(labels, valid))
@@ -40,7 +99,13 @@ def automatic_line_seeds(image, cfg, extra_points=()):
     spacing = float(cfg.get_path('wire.auto.seed_spacing_px', 32))
     if maximum < 1 or spacing <= 0:
         raise ValueError('max_seeds 和 seed_spacing_px 必须为正数')
-    seeds = [list(map(int, p)) for p in extra_points][:maximum]
+    seeds = [list(map(int, p)) for p in extra_points]
+    extra_count = len(seeds)
+    if enabled:
+        seeds = [p for p in seeds if 0 <= p[0] < image.shape[1]
+                 and 0 <= p[1] < image.shape[0] and allowed[p[1], p[0]]]
+    extra_kept = len(seeds)
+    seeds = seeds[:maximum]
     exhausted = set()
     rounds = 0
     while len(seeds) < maximum and len(exhausted) < len(parts):
@@ -59,7 +124,195 @@ def automatic_line_seeds(image, cfg, extra_points=()):
             if point not in seeds:
                 seeds.append(point)
         rounds += 1
-    return np.asarray(seeds, np.float32).reshape(-1, 2), len(seeds) >= maximum
+    points = np.asarray(seeds, np.float32).reshape(-1, 2)
+    capped = len(seeds) >= maximum
+    if diagnostics is not None:
+        origin = np.array(info['roi_xyxy_original_rgb'][:2])
+        info.update(allowed_pixels=int(allowed.sum()), roi_pixels=int(allowed.size),
+                    contrast_threshold=threshold, contrast_pixels_before_filter=before,
+                    contrast_pixels_after_filter=int(binary.sum()),
+                    contrast_pixels_filtered=before-int(binary.sum()),
+                    components_kept=len(valid), sampling_parts=len(parts),
+                    extra_points_input=extra_count, extra_points_filtered=extra_count-extra_kept,
+                    seed_count=len(points), seed_budget_reached=capped,
+                    seed_points_roi_xy=points.tolist(),
+                    seed_points_rgb_xy=(points+origin).tolist())
+        diagnostics.update(info)
+    return points, capped
+
+
+def draw_seed_debug(image, diagnostics):
+    """在局部图上显示搜索/排除区域与实际正点，不改动图像或分割掩码。"""
+    vis = image.copy()
+    if diagnostics['filter_enabled']:
+        allowed = np.ones(image.shape[:2], bool)
+        search = diagnostics['search_regions_roi_xyxy']
+        if search is not None:
+            allowed[:] = False
+            for x1, y1, x2, y2 in search:
+                allowed[y1:y2, x1:x2] = True
+        vis[~allowed] = (vis[~allowed] * 0.35).astype(np.uint8)
+        for x1, y1, x2, y2 in diagnostics['exclude_regions_roi_xyxy']:
+            patch = vis[y1:y2, x1:x2]
+            patch[:] = (patch * .5 + np.array([0, 0, 255]) * .5).astype(np.uint8)
+    for point in diagnostics['seed_points_roi_xy']:
+        cv2.circle(vis, tuple(map(int, point)), 3, (0, 255, 0), -1)
+    return vis
+
+
+def automatic_background_points(image, points, cfg, roi_xyxy=None):
+    """只在操作者确认的背景区内，为每个正点独立选择局部负点；无证据就回退。"""
+    enabled = cfg.get_path('wire.auto.negative_prompts.enabled', False)
+    if type(enabled) is not bool:
+        raise ValueError('negative_prompts.enabled必须为布尔值')
+    origin = np.asarray([0, 0] if roi_xyxy is None else roi_xyxy[:2])
+    groups = [[] for _ in points]
+    info = {'enabled': enabled, 'coordinate_space': 'original_rgb_pixels', 'candidates': [],
+            'mixed_candidates': 0, 'positive_only_candidates': len(points)}
+    if enabled:
+        def number(name, default, *, integer=False):
+            value = cfg.get_path(f'wire.auto.negative_prompts.{name}', default)
+            if (isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not np.isfinite(value) or value <= 0 or (integer and type(value) is not int)):
+                raise ValueError(f'negative_prompts.{name}必须为正的有限数值')
+            return value
+
+        maximum = number('max_points', 2, integer=True)
+        minimum = number('min_distance_px', 12)
+        radius = number('max_distance_px', 80)
+        clearance = number('wire_clearance_px', 6)
+        max_contrast = number('max_contrast', 6)
+        patch_radius = number('patch_radius_px', 2, integer=True)
+        patch_range = number('max_patch_range', 8)
+        spacing = number('spacing_px', 12)
+        if radius <= minimum or maximum > 8 or patch_radius > 32:
+            raise ValueError('负点半径范围无效，max_points上限8，patch_radius_px上限32')
+        region_cfg = Config({'wire': {'auto': {'seed_filter': {
+            'enabled': True,
+            'coordinate_space': cfg.get_path('wire.auto.negative_prompts.coordinate_space', 'original_rgb'),
+            'search_regions': cfg.get_path('wire.auto.negative_prompts.trusted_regions', []),
+        }}}})
+        # null在正点搜索中表示全图，但不能在负点中隐式授权全图为可信背景。
+        if region_cfg['wire.auto.seed_filter.search_regions'] is None:
+            raise ValueError('负点trusted_regions必须显式给出背景矩形，不能为null')
+        trusted, regions = seed_search_mask(image.shape, region_cfg, roi_xyxy)
+        kernel = np.ones((2*patch_radius+1, 2*patch_radius+1), np.uint8)
+        trusted = cv2.erode(trusted.astype(np.uint8), kernel,
+                            borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
+        contrast, _ = line_contrast(image, cfg)
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+        local_range = cv2.dilate(gray, kernel).astype(float) - cv2.erode(gray, kernel)
+        risk = (contrast >= max_contrast).astype(np.uint8)
+        for point in points:
+            cv2.circle(risk, tuple(map(int, point)), int(np.ceil(clearance)), 1, -1)
+        distance = cv2.distanceTransform(1-risk, cv2.DIST_L2, 5)
+        safe = trusted & (distance > clearance) & (local_range <= patch_range)
+        info.update(trusted_regions_roi_xyxy=regions['search_regions_roi_xyxy'],
+                    trusted_pixels=int(trusted.sum()), safe_pixels=int(safe.sum()))
+        h, w = safe.shape
+        for index, (px, py) in enumerate(points):
+            x1, x2 = max(0, int(px-radius)), min(w, int(px+radius)+1)
+            y1, y2 = max(0, int(py-radius)), min(h, int(py+radius)+1)
+            y, x = np.where(safe[y1:y2, x1:x2])
+            candidates = np.c_[x+x1, y+y1]
+            distances = ((candidates-[px, py])**2).sum(axis=1)
+            keep = (distances >= minimum**2) & (distances <= radius**2)
+            for _ in range(maximum):
+                indices = np.flatnonzero(keep)
+                if not len(indices):
+                    break
+                chosen = int(indices[np.argmin(distances[indices])])
+                point = candidates[chosen]
+                groups[index].append(point.tolist())
+                keep &= ((candidates-point)**2).sum(axis=1) >= spacing**2
+                keep[chosen] = False
+    for index, (positive, negatives) in enumerate(zip(points, groups)):
+        info['candidates'].append({
+            'seed_index': index, 'positive_roi_xy': positive.tolist(),
+            'positive_rgb_xy': (positive+origin).tolist(),
+            'negative_roi_xy': negatives,
+            'negative_rgb_xy': (np.asarray(negatives).reshape(-1, 2)+origin).tolist(),
+            'point_labels': [1]+[0]*len(negatives),
+            'final_mode': 'positive_negative' if negatives else 'positive_only',
+            'fallback_reason': None if negatives or not enabled else 'no_reliable_background',
+        })
+    return groups, info
+
+
+def predict_automatic_prompts(predictor, image_shape, points, negatives, batch, min_score, info):
+    """按点数分批，保持BxNx2/BxN；负点不满足输出约束时仅重试对应候选。"""
+    records = [[] for _ in points]
+
+    def predict(indices, use_negative):
+        coordinates = np.asarray([[points[i].tolist()]+(negatives[i] if use_negative else [])
+                                  for i in indices], np.float32)
+        labels = np.zeros(coordinates.shape[:2], np.int32)
+        labels[:, 0] = 1
+        masks, scores, _ = predictor.predict(
+            point_coords=coordinates, point_labels=labels, multimask_output=True)
+        masks, scores = np.asarray(masks), np.asarray(scores)
+        if masks.ndim == 3:
+            masks, scores = masks[None], scores[None]
+        if (masks.ndim != 4 or masks.shape[0] != len(indices)
+                or masks.shape[2:] != tuple(image_shape[:2]) or scores.shape != masks.shape[:2]):
+            raise ValueError('SAM2返回的提示批次/掩码尺寸不匹配')
+        for i, alternatives, qualities in zip(indices, masks, scores):
+            x, y = map(int, points[i])
+            for mask, score in zip(alternatives, qualities):
+                if not np.isfinite(score) or float(score) < min_score or not mask[y, x]:
+                    continue
+                if use_negative and any(mask[ny, nx] for nx, ny in negatives[i]):
+                    continue
+                records[i].append({'segmentation': mask, 'predicted_iou': float(score)})
+
+    # 不填充伪点、不广播共享负点；不同负点数量的候选使用独立批次。
+    by_count = {}
+    for i, group in enumerate(negatives):
+        by_count.setdefault(len(group), []).append(i)
+    for count, indices in by_count.items():
+        for offset in range(0, len(indices), batch):
+            chosen = indices[offset:offset+batch]
+            try:
+                predict(chosen, bool(count))
+            except ValueError:
+                if not count:
+                    raise
+                for i in chosen:
+                    records[i] = []
+                    info['candidates'][i]['fallback_reason'] = 'mixed_prompt_rejected'
+            if count:
+                retry = [i for i in chosen if not records[i]]
+                if retry:
+                    for i in retry:
+                        item = info['candidates'][i]
+                        item['final_mode'] = 'positive_only'
+                        item['fallback_reason'] = item['fallback_reason'] or 'no_mask_satisfies_mixed_prompt'
+                    predict(retry, False)
+    info['mixed_candidates'] = sum(c['final_mode'] == 'positive_negative' for c in info['candidates'])
+    info['positive_only_candidates'] = len(points)-info['mixed_candidates']
+    for candidate in info['candidates']:
+        candidate['final_point_labels'] = (
+            candidate['point_labels'] if candidate['final_mode'] == 'positive_negative' else [1])
+    return [record for group in records for record in group]
+
+
+def draw_prompt_debug(image, info):
+    """每个候选单独画正点和负点，避免将不同候选的点误读为同一组提示。"""
+    vis = image.copy()
+    cv2.circle(vis, tuple(map(int, info['positive_roi_xy'])), 4, (0, 255, 0), -1)
+    for point in info['negative_roi_xy']:
+        x, y = map(int, point)
+        cv2.drawMarker(vis, (x, y), (0, 0, 255), cv2.MARKER_TILTED_CROSS, 9, 2)
+    cv2.putText(vis, info['final_mode'], (5, 15), cv2.FONT_HERSHEY_SIMPLEX, .4, (255, 255, 255), 1)
+    return vis
+
+
+def save_prompt_debug(directory, image, info):
+    (directory/'prompts.json').write_text(json.dumps(info, ensure_ascii=False, indent=2))
+    for candidate in info['candidates']:
+        path = directory/f"prompt_{candidate['seed_index']:03d}.png"
+        if not cv2.imwrite(str(path), draw_prompt_debug(image, candidate)):
+            raise OSError('正负点调试图保存失败')
 
 
 def prune_continuing_endpoints(result, cfg):
@@ -103,7 +356,7 @@ def select_wire_masks(image, records, cfg, reference_shape=None):
             continue
         if mask.sum() < 12 or mask.mean() > float(cfg.get_path('wire.auto.max_area_fraction', 0.20)):
             continue
-        if any(np.logical_and(mask, previous).sum() / min(mask.sum(), previous.sum()) > 0.85 for previous in seen):
+        if any(np.logical_and(mask, previous).sum() / np.logical_or(mask, previous).sum() > 0.90 for previous in seen):
             continue
         from skimage.morphology import skeletonize
         skeleton = skeletonize(mask)
@@ -127,7 +380,7 @@ def select_wire_masks(image, records, cfg, reference_shape=None):
     selected = []
     for _, mask, info in sorted(choices, key=lambda row: row[0], reverse=True):
         # 同一根线的包含/重复掩码只保留一份，避免重复输出端部。
-        if any(np.logical_and(mask, previous).sum() / min(mask.sum(), previous.sum()) > 0.75
+        if any(np.logical_and(mask, previous).sum() / np.logical_or(mask, previous).sum() > 0.90
                for previous, _ in selected):
             continue
         selected.append((mask, info))
@@ -136,116 +389,257 @@ def select_wire_masks(image, records, cfg, reference_shape=None):
     return selected
 
 
-def attach_terminals(result, detections, masks):
-    """仅关联与端部区域重叠的检测，未匹配的几何候选仍保留未确认状态。"""
-    result.terminal_detections = detections
-    result.terminal_masks = masks
-    for candidate, region in zip(result.candidates, result.end_regions):
+def _terminal_pair_evidence(result, detection, terminal_mask, instance, cfg, cache):
+    """对一个端子和一个实例评估几何；分数不能覆盖硬拒绝条件。"""
+    maximum = float(cfg.get_path('wire.auto.terminal_path_max_distance_px', 12))
+    gap_limit = float(cfg.get_path('wire.auto.terminal_match.max_gap_px', 6))
+    end_zone = float(cfg.get_path('wire.auto.terminal_match.endpoint_zone_px', 24))
+    angle_limit = float(cfg.get_path('wire.auto.terminal_match.max_axis_angle_deg', 35))
+    evidence = {'instance_id': instance.instance_id, 'score': 0.0, 'eligible': False,
+                'rejection_reasons': [], 'features': {}}
+    reasons, features = evidence['rejection_reasons'], evidence['features']
+    if instance.ambiguous:
+        reasons.append('wire_instance_ambiguous')
+    if not instance.paths_xy or len(instance.paths_xy[0]) < 9:
+        reasons.append('instance_centerline_unavailable')
+        return evidence
+    path = np.asarray(instance.paths_xy[0], float)
+    ty, tx = np.where(terminal_mask)
+    terminal_points = np.c_[tx, ty].astype(float)
+    centered = terminal_points-terminal_points.mean(0)
+    _, axes = np.linalg.eigh(centered.T @ centered/max(len(centered), 1))
+    axis = axes[:, -1]
+    extent = np.ptp(centered @ axes, axis=0)+1
+    aspect = float(extent[-1]/max(extent[0], 1))
+    if aspect < float(cfg.get_path('wire.auto.terminal_match.min_aspect_ratio', 1.5)):
+        reasons.append('terminal_axis_unreliable')
+    if instance.instance_id not in cache:
+        raster = np.zeros(result.mask.shape, np.uint8)
+        pixels = np.rint(path).astype(int)
+        raster[pixels[:, 1], pixels[:, 0]] = 1
+        cache[instance.instance_id] = (
+            cv2.distanceTransform(1-raster, cv2.DIST_L2, 5),
+            cv2.distanceTransform((~instance.mask).astype(np.uint8), cv2.DIST_L2, 5))
+    path_distance, mask_distance = cache[instance.instance_id]
+    closest_terminal = terminal_points[int(path_distance[ty, tx].argmin())]
+    distances = np.linalg.norm(path-closest_terminal, axis=1)
+    index = int(distances.argmin())
+    distance = float(distances[index])
+    gap = float(mask_distance[ty, tx].min())
+    arc = np.r_[0., np.linalg.norm(np.diff(path, axis=0), axis=1).cumsum()]
+    endpoint = 0 if arc[index] <= arc[-1]-arc[index] else 1
+    endpoint_arc = float(min(arc[index], arc[-1]-arc[index]))
+    lo, hi = max(0, index-8), min(len(path)-1, index+8)
+    tangent = path[hi]-path[lo]
+    norm = np.linalg.norm(tangent)
+    alignment = abs(float(axis @ tangent/norm)) if norm else 0.0
+    angle = float(np.degrees(np.arccos(np.clip(alignment, 0, 1))))
+    width = max(float(instance.geometry.get('median_width_px', 0)), 1)
+    width_ratio = float(extent[0]/width)
+    length_ratio = float(extent[-1]/width)
+    if distance > maximum:
+        reasons.append('terminal_too_far_from_instance_path')
+    if gap > gap_limit:
+        reasons.append('no_local_connection_support')
+    if endpoint_arc > end_zone:
+        reasons.append('terminal_not_near_wire_end')
+    if angle > angle_limit:
+        reasons.append('terminal_axis_not_aligned_with_wire')
+    if not .3 <= width_ratio <= 6 or not 1 <= length_ratio <= 20:
+        reasons.append('terminal_wire_geometry_implausible')
+    # 只检查本实例到端子的局部连接；其他实例接触该区域时不作最近距离裁决。
+    route = terminal_mask.astype(np.uint8).copy()
+    cv2.line(route, tuple(np.rint(closest_terminal).astype(int)), tuple(np.rint(path[index]).astype(int)), 1, 1)
+    corridor = cv2.dilate(route, np.ones((3, 3), np.uint8)) > 0
+    rivals = [other.instance_id for other in result.instances
+              if other.instance_id != instance.instance_id and np.any(corridor & other.mask)]
+    if rivals:
+        reasons.append('competing_instance_local_contact')
+    direct = bool(np.any(terminal_mask & instance.mask))
+    try:
+        confidence = float(detection.get('confidence', 0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+        reasons.append('terminal_confidence_invalid')
+    if not np.isfinite(confidence) or not 0 <= confidence <= 1:
+        reasons.append('terminal_confidence_invalid')
+        confidence = 0.0
+    if confidence < float(cfg.get_path('wire.auto.terminal_confidence', .4)):
+        reasons.append('terminal_confidence_below_threshold')
+    score = (.25*max(0., 1-distance/maximum)+.30*alignment
+             +.25*(1. if direct else max(0., 1-gap/gap_limit))
+             +.15*max(0., 1-endpoint_arc/end_zone)+.05*np.clip(confidence, 0, 1))
+    features.update(path_distance_px=distance, mask_gap_px=gap, endpoint_arc_px=endpoint_arc,
+                    tangent_xy=(tangent/norm).tolist() if norm else None,
+                    terminal_axis_xy=axis.tolist(), axis_angle_deg=angle, aspect_ratio=aspect,
+                    terminal_width_wire_ratio=width_ratio, terminal_length_wire_ratio=length_ratio,
+                    direct_mask_overlap=direct,
+                    connection_kind=('overlap' if direct else 'clear_short_gap' if gap <= gap_limit and not rivals
+                                     else 'unsupported_or_conflicting_gap'),
+                    competing_instance_ids=rivals)
+    evidence.update(score=float(score), endpoint_index=endpoint, path_index=index,
+                    boundary_xy=path[index].tolist(), eligible=not reasons)
+    return evidence
+
+
+def associate_terminal_instances(result, cfg):
+    """语义证据按实例匹配；保留所有评分、拒绝原因及竞争关系，不赋予抓取许可。"""
+    minimum = float(cfg.get_path('wire.auto.terminal_match.min_score', .55))
+    margin = float(cfg.get_path('wire.auto.terminal_match.ambiguity_margin', .15))
+    positive_settings = [cfg.get_path('wire.auto.terminal_path_max_distance_px', 12),
+                         cfg.get_path('wire.auto.terminal_match.max_gap_px', 6),
+                         cfg.get_path('wire.auto.terminal_match.endpoint_zone_px', 24),
+                         cfg.get_path('wire.auto.terminal_match.max_axis_angle_deg', 35),
+                         cfg.get_path('wire.auto.terminal_match.min_aspect_ratio', 1.5)]
+    if (any(not np.isfinite(float(v)) or float(v) <= 0 for v in positive_settings)
+            or not np.isfinite(minimum) or not 0 <= minimum <= 1
+            or not np.isfinite(margin) or not 0 <= margin <= 1):
+        raise ValueError('端子实例匹配阈值无效')
+    cache, reports = {}, []
+    ids = [d.get('id') for d in result.terminal_detections]
+    for index, detection in enumerate(result.terminal_detections):
+        report = {'terminal_id': detection.get('id'), 'status': 'unmatched', 'instance_id': None,
+                  'score': None, 'semantic_evidence_only': True, 'rejection_reasons': [], 'matches': []}
+        detection['wire_association'] = report
+        # 检测关联不写confirmed，保留已存在的人工确认状态。
+        if ids.count(detection.get('id')) != 1:
+            report['rejection_reasons'].append('duplicate_terminal_id')
+        elif index >= len(result.terminal_masks):
+            report['rejection_reasons'].append('terminal_mask_missing')
+        else:
+            mask = np.asarray(result.terminal_masks[index], bool)
+            if mask.shape != result.mask.shape or mask.sum() < 6:
+                report['rejection_reasons'].append('terminal_mask_invalid')
+            else:
+                colors = result.image_bgr[mask].astype(float)
+                report['appearance_auxiliary'] = {
+                    'mean_brightness': float(colors.mean()),
+                    'bright_achromatic_fraction': float(np.mean((colors.mean(1) > 160) & (np.ptp(colors, axis=1) < 30))),
+                    'used_for_match_decision': False}
+                count, _ = cv2.connectedComponents(mask.astype(np.uint8), 8)
+                report['terminal_connected_components'] = count-1
+                report['matches'] = [_terminal_pair_evidence(result, detection, mask, owner, cfg, cache)
+                                     for owner in result.instances]
+                if count > 2:
+                    report['rejection_reasons'].append('terminal_mask_fragmented')
+                if not result.instances:
+                    report['rejection_reasons'].append('wire_instances_unavailable')
+                eligible = sorted([m for m in report['matches'] if m['eligible'] and m['score'] >= minimum],
+                                  key=lambda m: m['score'], reverse=True)
+                uncertain = any(m['features'].get('path_distance_px', np.inf) <= float(positive_settings[0])
+                                and (count > 2 or any(r in m['rejection_reasons'] for r in
+                                        ('wire_instance_ambiguous', 'competing_instance_local_contact',
+                                         'terminal_axis_unreliable')))
+                                for m in report['matches'])
+                if uncertain:
+                    report.update(status='ambiguous')
+                    report['rejection_reasons'].append('wire_identity_or_local_connection_ambiguous')
+                elif len(eligible) > 1 and eligible[0]['score']-eligible[1]['score'] <= margin:
+                    report.update(status='ambiguous')
+                    report['rejection_reasons'].append('multiple_instances_with_similar_support')
+                elif eligible and not report['rejection_reasons']:
+                    best = eligible[0]
+                    report.update(status='matched', instance_id=best['instance_id'], score=best['score'],
+                                  endpoint_index=best['endpoint_index'], path_index=best['path_index'],
+                                  boundary_xy=best['boundary_xy'])
+                elif not report['rejection_reasons']:
+                    report['rejection_reasons'].append('no_geometrically_supported_instance')
+        reports.append(report)
+    # 两个检测竞争同一实例同一端部时拒绝二选一；不同端部可独立匹配。
+    assignments = {}
+    for report in reports:
+        if report['status'] == 'matched':
+            assignments.setdefault((report['instance_id'], report['endpoint_index']), []).append(report)
+    for group in assignments.values():
+        if len(group) > 1:
+            for report in group:
+                report.update(status='ambiguous', instance_id=None, endpoint_index=None,
+                              path_index=None, boundary_xy=None)
+                report['rejection_reasons'].append('multiple_terminals_compete_for_same_wire_end')
+    result.automation['terminal_association'] = {
+        'schema_version': 1, 'coordinate_space': 'original_rgb_pixels',
+        'semantic_evidence_only': True, 'reports': reports}
+    return reports
+
+
+def attach_terminals(result, detections, masks, cfg=None):
+    """仅把无歧义实例匹配结果作为端部语义证据，不确认交界或生成执行许可。"""
+    result.terminal_detections, result.terminal_masks = detections, masks
+    settings = cfg if cfg is not None else Config()
+    reports = associate_terminal_instances(result, settings)
+    owners = {instance.instance_id: instance for instance in result.instances}
+    for candidate in result.candidates:
         evidence = []
-        for detection, mask in zip(detections, masks):
-            if np.any(region & mask):
-                evidence.append({'id': detection['id'], 'confidence': detection['confidence']})
+        owner = owners.get(candidate.get('instance_id'))
+        if owner is not None and owner.paths_xy:
+            path = owner.paths_xy[0]
+            side = int(np.linalg.norm(path[-1]-candidate['tip_xy']) < np.linalg.norm(path[0]-candidate['tip_xy']))
+            for detection, report in zip(detections, reports):
+                if (report['status'] == 'matched' and report['instance_id'] == owner.instance_id
+                        and report['endpoint_index'] == side
+                        and np.linalg.norm(np.asarray(candidate['tip_xy'])-report['boundary_xy']) <=
+                        float(settings.get_path('wire.auto.terminal_match.endpoint_zone_px', 24))):
+                    evidence.append({'id': detection['id'], 'confidence': detection['confidence'],
+                                     'instance_id': owner.instance_id, 'match_score': report['score'],
+                                     'semantic_evidence_only': True})
         candidate['terminal_model_evidence'] = evidence
         candidate['terminal_status'] = 'model_detected' if evidence else 'geometry_only'
     if not detections:
         result.warnings.append('端子模型未检出端子；当前只有线材几何端部候选')
+    elif any(report['status'] == 'ambiguous' for report in reports):
+        result.warnings.append('端子与线材实例关联存在歧义，不能据此确认交界')
     elif any(not item['terminal_model_evidence'] for item in result.candidates):
-        result.warnings.append('部分几何端部没有端子模型支持，不能将它们全部视为已识别端子')
-
-
-def _path_length(path):
-    points = np.asarray(path, dtype=float)
-    if len(points) < 2:
-        return 0.0
-    return float(np.linalg.norm(np.diff(points, axis=0), axis=1).sum())
+        result.warnings.append('部分几何端部没有可靠的端子实例证据，仍需人工确认')
 
 
 def attach_terminal_guided_boundaries(result, cfg):
-    """用YOLO端子掩码在主中心线上定位交界，不要求它与几何端部区域重叠。"""
+    """可选实验只产生模型交界预测；仍须人工确认和任务5的独立执行复核。"""
     suggestions = {}
-    max_distance = float(cfg.get_path('wire.auto.terminal_path_max_distance_px', 12))
-    if max_distance <= 0:
-        raise ValueError('terminal_path_max_distance_px 必须为正数')
+    result.automation['terminal_boundary_suggestions'] = suggestions
+    result.automation['terminal_guided_candidates'] = []
+    if not cfg.get_path('wire.auto.terminal_auto_boundary', False):
+        return suggestions
+    reports = associate_terminal_instances(result, cfg)
+    owners = {instance.instance_id: instance for instance in result.instances}
     inset = float(cfg.get_path('wire.inset_px', 12))
-    used_ids = {candidate['id'] for candidate in result.candidates}
-    for detection, terminal_mask in zip(result.terminal_detections, result.terminal_masks):
-        mask = np.asarray(terminal_mask, dtype=bool)
-        if not mask.any():
+    for detection, report in zip(result.terminal_detections, reports):
+        if report['status'] != 'matched':
             continue
-        ty, tx = np.where(mask)
-        terminal_points = np.c_[tx, ty].astype(float)
-        best = None
-        for local_index, path in enumerate(result.paths_xy):
-            points = np.asarray(path, dtype=float)
-            if len(points) < int(2 * inset + 5):
-                continue
-            delta = terminal_points[:, None, :] - points[None, :, :]
-            distances = np.linalg.norm(delta, axis=2)
-            terminal_index, path_index = np.unravel_index(
-                int(np.argmin(distances)), distances.shape)
-            distance = float(distances[terminal_index, path_index])
-            if best is None or distance < best[0]:
-                best = (distance, local_index, path, int(path_index))
-        if best is None or best[0] > max_distance:
+        owner = owners[report['instance_id']]
+        path, index = owner.paths_xy[0], report['path_index']
+        boundary = np.asarray(report['boundary_xy'], float)
+        if any(c.get('instance_id') == owner.instance_id
+               and np.linalg.norm(np.asarray(c['tip_xy'])-boundary) <= 6 for c in result.candidates):
             continue
-        distance, path_index, path, boundary_index = best
-        boundary = np.asarray(path[boundary_index], dtype=float)
-        # 已有几何端点就在端子交界处时不重复造候选。
-        if any(
-            candidate.get('inward_path_xy')
-            and np.min(np.linalg.norm(
-                np.asarray(candidate['inward_path_xy'], dtype=float) - boundary, axis=1)) <= 6
-            for candidate in result.candidates
-        ):
+        inward = path[index:] if report['endpoint_index'] == 0 else path[:index+1][::-1]
+        if len(inward) < inset+5:
             continue
-        left = path[:boundary_index + 1][::-1]
-        right = path[boundary_index:]
-        inward = left if _path_length(left) >= _path_length(right) else right
-        if len(inward) < int(inset + 5):
-            continue
-        distances = np.r_[0.0, np.linalg.norm(np.diff(inward, axis=0), axis=1).cumsum()]
-        near_index = min(int(np.searchsorted(distances, inset)), len(inward) - 1)
-        a, b = max(0, near_index - 5), min(len(inward) - 1, near_index + 5)
-        tangent = np.asarray(inward[b], dtype=float) - np.asarray(inward[a], dtype=float)
+        arc = np.r_[0., np.linalg.norm(np.diff(inward, axis=0), axis=1).cumsum()]
+        near = min(int(np.searchsorted(arc, inset)), len(inward)-1)
+        tangent = inward[min(len(inward)-1, near+5)]-inward[max(0, near-5)]
         norm = float(np.linalg.norm(tangent))
         if norm <= 0:
             continue
         sequence = 1
-        candidate_id = f'Y{sequence}'
-        while candidate_id in used_ids:
+        while any(c['id'] == f'Y{sequence}' for c in result.candidates):
             sequence += 1
-            candidate_id = f'Y{sequence}'
-        used_ids.add(candidate_id)
-        evidence = {
-            'id': detection['id'],
-            'confidence': detection['confidence'],
-            'bbox_xyxy': detection['bbox_xyxy'],
-            'association': 'nearest_main_centerline_to_terminal_mask',
-            'path_distance_px': distance,
-        }
-        region = _end_region(result.mask, np.rint(boundary).astype(int), 2 * inset)
+        cid = f'Y{sequence}'
+        evidence = {'id': detection['id'], 'confidence': detection['confidence'],
+                    'instance_id': owner.instance_id, 'match_score': report['score'], 'semantic_evidence_only': True}
+        region = _end_region(owner.mask, np.rint(boundary).astype(int), 2*inset)
         result.candidates.append({
-            'id': candidate_id,
-            'component_id': path_index,
-            'tip_xy': np.rint(boundary).astype(int).tolist(),
-            'near_tip_xy': np.asarray(inward[near_index], dtype=int).tolist(),
-            'tangent_xy': (tangent / norm).tolist(),
-            'inward_path_xy': np.asarray(inward, dtype=int).tolist(),
-            'path_ambiguous': False,
-            'inset_px': float(distances[near_index]),
-            'end_region_pixels': int(region.sum()),
-            'end_region_extent_px': float(2 * inset),
-            'kind': 'terminal_model_guided_boundary_path',
-            'confirmed': True,
-            'terminal_model_evidence': [evidence],
-            'terminal_status': 'model_detected',
-            'boundary_confirmation': 'terminal_model_guided_nearest_path',
-        })
+            'id': cid, 'instance_id': owner.instance_id, 'component_id': int(owner.instance_id[1:]),
+            'tip_xy': np.rint(boundary).astype(int).tolist(), 'near_tip_xy': inward[near].astype(int).tolist(),
+            'tangent_xy': (tangent/norm).tolist(), 'inward_path_xy': inward.astype(int).tolist(),
+            'path_ambiguous': owner.ambiguous, 'inset_px': float(arc[near]),
+            'end_region_pixels': int(region.sum()), 'end_region_extent_px': 2*inset,
+            'kind': 'terminal_model_guided_boundary_path', 'confirmed': False,
+            'terminal_model_evidence': [evidence], 'terminal_status': 'model_detected',
+            'boundary_confirmation_source': 'model_prediction',
+            'boundary_confirmation': 'instance_geometry_model_prediction'})
         result.end_regions.append(region)
-        suggestions[candidate_id] = boundary.tolist()
-        detection['guided_candidate_id'] = candidate_id
-        detection['boundary_xy'] = boundary.tolist()
-    result.automation['terminal_boundary_suggestions'] = suggestions
+        suggestions[cid] = boundary.tolist()
+        detection['guided_candidate_id'], detection['boundary_xy'] = cid, boundary.tolist()
     result.automation['terminal_guided_candidates'] = list(suggestions)
     return suggestions
 
@@ -260,6 +654,7 @@ class AutomaticWireRecognizer:
         self.terminal_runtime_error = None
         self.generation_stats = {}
         self.terminal_seed_points = []
+        self.seed_roi_xyxy = None
 
     def prepare_terminal_runtime(self):
         """主线程在取流/窗口/推理线程启动前调用，防止库导入修改OpenCV全局线程池。"""
@@ -283,38 +678,59 @@ class AutomaticWireRecognizer:
 
     def _generate(self, image):
         import torch
-        self.segmenter._load()
-        amp = (torch.autocast('cuda', dtype=torch.bfloat16)
-               if self.segmenter.device == 'cuda' and torch.cuda.is_bf16_supported() else nullcontext())
-        if self.cfg.get_path('wire.auto.method', 'line_prompts') != 'dense':
+        method = self.cfg.get_path('wire.auto.method', 'line_prompts')
+        debug_enabled = self.cfg.get_path('wire.auto.seed_debug.enabled', False)
+        if type(debug_enabled) is not bool:
+            raise ValueError('seed_debug.enabled必须为布尔值')
+        if method == 'dense' and (debug_enabled or self.cfg.get_path('wire.auto.seed_filter.enabled', False)
+                                  or self.cfg.get_path('wire.auto.negative_prompts.enabled', False)):
+            raise ValueError('种子过滤/调试/正负点仅支持line_prompts，dense模式请关闭相应开关')
+        if method != 'dense':
             extra_points = (
                 self.terminal_seed_points
                 if self.cfg.get_path('wire.auto.terminal_use_seeds', False)
                 else []
             )
-            points, capped = automatic_line_seeds(image, self.cfg, extra_points)
+            diagnostics = {}
+            points, capped = automatic_line_seeds(
+                image, self.cfg, extra_points, roi_xyxy=self.seed_roi_xyxy, diagnostics=diagnostics)
             self.generation_stats = {'method': 'line_prompts', 'seed_count': len(points),
-                                     'seed_budget_reached': capped, 'seed_points_xy': points.tolist()}
+                                     'seed_budget_reached': capped, 'seed_points_xy': points.tolist(),
+                                     'seed_filter': diagnostics}
+            negatives, prompt_info = automatic_background_points(image, points, self.cfg, self.seed_roi_xyxy)
+            self.generation_stats['automatic_prompts'] = prompt_info
+            if debug_enabled:
+                directory = Path(self.cfg.get_path('wire.auto.seed_debug.directory', 'output/wire_seeds'))
+                if not directory.is_absolute():
+                    directory = ROOT / directory
+                # 每次推理独占目录，避免GUI重复刷新覆盖A/B证据。
+                directory = directory / f'seeds_{uuid.uuid4().hex}'
+                directory.mkdir(parents=True, exist_ok=False)
+                if not cv2.imwrite(str(directory/'seeds_roi.png'), draw_seed_debug(image, diagnostics)):
+                    raise OSError('种子调试图保存失败')
+                (directory/'seeds.json').write_text(json.dumps(diagnostics, ensure_ascii=False, indent=2))
+                self.generation_stats['seed_debug_directory'] = str(directory)
             if not len(points):
+                if debug_enabled:
+                    save_prompt_debug(directory, image, prompt_info)
                 return []
-            records = []
+            self.segmenter._load()
+            amp = (torch.autocast('cuda', dtype=torch.bfloat16)
+                   if self.segmenter.device == 'cuda' and torch.cuda.is_bf16_supported() else nullcontext())
             batch = int(self.cfg.get_path('wire.auto.prompt_batch', 8))
             if batch < 1:
                 raise ValueError('prompt_batch 必须为正数')
             with torch.inference_mode(), amp:
                 self.segmenter.predictor.set_image(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
-                for i in range(0, len(points), batch):
-                    pts = points[i:i + batch, None, :]
-                    masks, scores, _ = self.segmenter.predictor.predict(
-                        point_coords=pts, point_labels=np.ones(pts.shape[:2], np.int32), multimask_output=True)
-                    if masks.ndim == 3:
-                        masks, scores = masks[None], scores[None]
-                    for point, alternatives, qualities in zip(points[i:i + batch], masks, scores):
-                        x, y = map(int, point)
-                        for mask, score in zip(alternatives, qualities):
-                            if np.isfinite(score) and float(score) >= float(self.cfg.get_path('wire.auto.min_score', 0.5)) and mask[y, x]:
-                                records.append({'segmentation': mask, 'predicted_iou': float(score)})
+                records = predict_automatic_prompts(
+                    self.segmenter.predictor, image.shape, points, negatives, batch,
+                    float(self.cfg.get_path('wire.auto.min_score', 0.5)), prompt_info)
+            if debug_enabled:
+                save_prompt_debug(directory, image, prompt_info)
             return records
+        self.segmenter._load()
+        amp = (torch.autocast('cuda', dtype=torch.bfloat16)
+               if self.segmenter.device == 'cuda' and torch.cuda.is_bf16_supported() else nullcontext())
         if self.generator is None:
             from sam2.automatic_mask_generator import SAM2AutomaticMaskGenerator
             self.generator = SAM2AutomaticMaskGenerator(
@@ -375,6 +791,12 @@ class AutomaticWireRecognizer:
         full_image = image
         h, w = image.shape[:2]
         roi = self.cfg.get_path('wire.auto.roi_xyxy')
+        reference_size = self.cfg.get_path('wire.auto.roi_reference_size_wh')
+        if roi is not None and reference_size is not None:
+            if (not isinstance(reference_size, (list, tuple)) or len(reference_size) != 2
+                    or any(type(v) is not int or v <= 0 for v in reference_size)
+                    or list(reference_size) != [w, h]):
+                raise ValueError('固定视角ROI的原图尺寸不匹配，请重新配置ROI；禁止自动缩放像素')
         if roi is None:
             roi = [0, 0, w, h]
         if (not isinstance(roi, (list, tuple)) or len(roi) != 4
@@ -384,6 +806,8 @@ class AutomaticWireRecognizer:
         if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h and min(x2-x1, y2-y1) >= 32):
             raise ValueError('自动识别工作区越界或小于32像素')
         image = image[y1:y2, x1:x2]
+        self.seed_roi_xyxy = list(roi)
+        self.generation_stats = {}
         start = time.perf_counter()
         detections, terminal_masks, terminal_error = [], [], None
         terminal_enabled = self.cfg.get_path('wire.auto.terminal_enabled', True)
@@ -417,15 +841,17 @@ class AutomaticWireRecognizer:
             box = np.asarray(detection['bbox_xyxy']) + [x1, y1, x1, y1]
             detection['bbox_xyxy'] = box.tolist()
         if selected:
-            mask = restore(np.logical_or.reduce([m for m, _ in selected]))
-            result = analyze_mask(full_image, mask, crop_xyxy=roi,
-                                  score=float(np.mean([i['sam_score'] for _, i in selected])),
-                                  inset_px=float(self.cfg.get_path('wire.inset_px', 12)))
+            result = analyze_instance_masks(
+                full_image, [restore(m) for m, _ in selected], crop_xyxy=roi,
+                scores=[info['sam_score'] for _, info in selected],
+                inset_px=float(self.cfg.get_path('wire.inset_px', 12)))
         else:
             blank = np.zeros(full_image.shape[:2], bool)
             result = WireResult(full_image.copy(), blank, blank.copy(), np.empty((0, 2), int), [], 0, 0,
                                 list(roi), ['未分出线身；端子检测单独保留，可按R重新取景'])
+        instance_debug = result.automation.get('duplicate_wire_hypotheses', [])
         result.automation = {
+            'duplicate_wire_hypotheses': instance_debug,
             'method': self.generation_stats.get('method', 'line_prompts'), 'manual_prompts': False,
             'generated_masks': len(records), 'selected_masks': [info for _, info in selected],
             'sam_score_aggregation': 'mean_predicted_iou_of_selected_masks',
@@ -444,7 +870,7 @@ class AutomaticWireRecognizer:
             candidate['terminal_status'] = 'geometry_only'
         if terminal_enabled:
             if terminal_error is None:
-                attach_terminals(result, detections, terminal_masks)
+                attach_terminals(result, detections, terminal_masks, self.cfg)
                 if self.cfg.get_path('wire.auto.terminal_auto_boundary', False):
                     attach_terminal_guided_boundaries(result, self.cfg)
                 result.automation['terminal_status'] = 'ok'

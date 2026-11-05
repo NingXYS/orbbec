@@ -1,6 +1,7 @@
 """端子/绝缘交界后的夹持中心策略；位置与工具TCP补偿分别处理。"""
 
 import copy
+import hashlib
 
 import numpy as np
 
@@ -126,6 +127,8 @@ def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
     if unknown:
         raise ValueError(f'交界点对应的候选不存在：{sorted(unknown)}')
     plans = []
+    from segmentation.path_validation import manual_mask_review
+    mask_review = manual_mask_review(result)
     for candidate in result.candidates:
         data = metric_paths.get(candidate['id'], {})
         if offset == 14:
@@ -137,6 +140,24 @@ def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
                 path_xyz_m=data.get('xyz_m'),plane_normal=data.get('plane_normal'))
             plan.update(policy_version='legacy-comparison-only',validity='PREVIEW_ONLY',executable=False,
                         planning_allowed=False,rejection_reasons=['LEGACY_OFFSET_COMPARISON_ONLY','PHASE2_BLOCKED'])
+        from segmentation.path_validation import build_path_validation
+        source = candidate.get('boundary_confirmation_source')
+        if source is None:
+            source = ('model_prediction' if candidate.get('kind') == 'terminal_model_guided_boundary_path'
+                      else 'manual' if candidate['id'] in boundaries else 'none')
+        human = source == 'manual' and plan.get('boundary_confirmed') is True
+        plan['instance_id'] = candidate.get('instance_id')
+        plan['boundary_verification'] = {'source': source, 'human_confirmed': human,
+                                         'point_available': plan.get('boundary_confirmed') is True}
+        validation = build_path_validation(result, candidate, plan, data.get('xyz_m'))
+        plan['visual_path_validation'] = validation
+        plan['readiness_blockers'] = list(validation['rejection_reasons'])
+        plan['readiness_blockers'].extend(mask_review['rejection_reasons'])
+        if plan.get('boundary_confirmed') and not human:
+            plan['readiness_blockers'].append('visual_path_boundary_not_manually_verified')
+        plan['verification_stages'] = {
+            'boundary_source': source, 'human_confirmed': human,
+            'instance_path_verified': validation['passed'], 'coordinate_calculation_succeeded': False}
         plans.append(plan)
     result.grasp_policy = {
         'anchor': 'terminal_insulation_boundary', 'offset_mm': offset,
@@ -146,9 +167,39 @@ def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
         'robot_pose_valid': False, 'tcp_compensation_applied': False,
         'policy_version': 'wire-v2-total14mm' if offset == 14 else 'legacy-comparison-only',
         'motion_commands_enabled': False, 'executable': False, 'phase2': 'BLOCKED',
+        'local_path_validation_schema_version': 1,
+        'mask_origin': result.automation.get('method', 'unspecified'),
+        'manual_mask_review': mask_review,
+        'image_rgb_sha256': hashlib.sha256(np.ascontiguousarray(result.image_bgr).tobytes()).hexdigest(),
+        'visual_readiness_by_candidate': {p['candidate_id']: p['readiness_blockers'] for p in plans},
     }
+    from segmentation.path_validation import encode_instance_evidence
+    result.grasp_policy['instance_mask_evidence'] = encode_instance_evidence(result)
     result.grasp_plans = plans
     return result
+
+
+def confirm_manual_mask(result, cfg):
+    """操作者单独复核手动线身；不清除任何分叉、交叉或断线标记。"""
+    from segmentation.wire import analyze_mask
+    from segmentation.path_validation import instance_mask_digest
+    if result.automation.get('method') != 'manual_prompts':
+        raise ValueError('V用于复核手动纠正后的线身；自动结果可直接Shift确认交界')
+    if len(result.instances) != 1 or result.instances[0].ambiguous:
+        raise ValueError('手动掩码仍有实例歧义，请继续补点；不能强制复核通过')
+    instance = result.instances[0]
+    checked = analyze_mask(result.image_bgr, instance.mask, crop_xyxy=result.crop_xyxy)
+    if (len(checked.instances) != 1 or checked.instances[0].ambiguous
+            or len(checked.instances[0].paths_xy) != 1):
+        raise ValueError('线身拓扑复核未通过，请重新纠正分割')
+    result.automation['manual_mask_review'] = {
+        'schema_version': 1, 'human_reviewed': True, 'instance_id': instance.instance_id,
+        'image_rgb_sha256': hashlib.sha256(result.image_bgr.tobytes()).hexdigest(),
+        'mask_sha256': instance_mask_digest(instance.mask),
+        'operator_contract': 'target_body_mask_and_visible_no_touch_crossing_reviewed'}
+    boundaries = {p['candidate_id']: p['boundary_input_xy'] for p in result.grasp_plans if p.get('boundary_confirmed')}
+    apply_grasp_policy(result, cfg, boundaries)
+    return instance.instance_id
 
 
 def confirm_boundary(result, point, cfg):
@@ -175,7 +226,10 @@ def confirm_boundary(result, point, cfg):
     boundaries[chosen] = point.tolist()
     # 先完成校验再替换结果，点击错误时保留上次确认。
     updated = copy.copy(result)
+    updated.candidates = copy.deepcopy(result.candidates)
+    next(c for c in updated.candidates if c['id'] == chosen)['boundary_confirmation_source'] = 'manual'
     apply_grasp_policy(updated, cfg, boundaries)
+    result.candidates = updated.candidates
     result.grasp_policy, result.grasp_plans = updated.grasp_policy, updated.grasp_plans
     return chosen
 
@@ -186,6 +240,21 @@ def confirm_body_boundary(result, point, cfg):
     point = np.asarray(point, dtype=float)
     if point.shape != (2,) or not np.isfinite(point).all():
         raise ValueError('交界点必须为有限像素坐标')
+    owner = None
+    matches = []
+    for instance in result.instances:
+        distance = min((float(np.linalg.norm(path-point, axis=1).min())
+                        for path in instance.paths_xy if len(path)), default=np.inf)
+        if distance <= 12:
+            matches.append((distance, instance))
+    if matches:
+        matches.sort(key=lambda row: row[0])
+        # 人工确认交界不等于确认交叉处的实例归属，禁止借主路径回退解除歧义。
+        nearby = [instance for distance, instance in matches if distance <= matches[0][0]+2]
+        if len(nearby) > 1 or nearby[0].ambiguous:
+            raise ValueError('线材实例归属存在歧义，请分开接触/交叉线材或重新分割')
+        owner = nearby[0]
+    owner_mask = owner.mask if owner is not None else result.mask
     updated = copy.copy(result)
     updated.candidates = copy.deepcopy(result.candidates)
     updated.end_regions = list(result.end_regions)
@@ -207,7 +276,7 @@ def confirm_body_boundary(result, point, cfg):
                          terminal_status='manual_boundary_not_terminal_tip',
                          terminal_model_evidence=[], confirmed=False)
         updated.candidates.append(candidate)
-        updated.end_regions.append(_end_region(result.mask, candidate['tip_xy'], 24))
+        updated.end_regions.append(_end_region(owner_mask, candidate['tip_xy'], 24))
     # 真实端子交界常位于主中心线中部而非几何端点；人工点到主路径附近时，
     # 直接从该路径点沿较长一侧生成候选，避免强迫用户点击错误的块体端点。
     if not manual_fallback_blocked and not any(
@@ -246,6 +315,7 @@ def confirm_body_boundary(result, point, cfg):
                     boundary = points[index]
                     candidate = {
                         'id': candidate_id,
+                        'instance_id': owner.instance_id if owner is not None else None,
                         'component_id': component_id,
                         'tip_xy': np.rint(boundary).astype(int).tolist(),
                         'near_tip_xy': np.asarray(inward[near_index], dtype=int).tolist(),
@@ -262,7 +332,7 @@ def confirm_body_boundary(result, point, cfg):
                     }
                     updated.candidates.append(candidate)
                     updated.end_regions.append(
-                        _end_region(result.mask, np.rint(boundary).astype(int), 2 * inset)
+                        _end_region(owner_mask, np.rint(boundary).astype(int), 2 * inset)
                     )
                     point = boundary
     chosen = confirm_boundary(updated, np.asarray(point, float), cfg)

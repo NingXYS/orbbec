@@ -22,6 +22,28 @@ class SegmentationError(ValueError):
 
 
 @dataclass
+class WireInstance:
+    instance_id: str
+    source_mask_id: str
+    mask: np.ndarray
+    paths_xy: list[np.ndarray]
+    geometry: dict
+    ambiguity_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def ambiguous(self):
+        return bool(self.ambiguity_reasons)
+
+    def to_dict(self):
+        return {'instance_id': self.instance_id, 'source_mask_id': self.source_mask_id,
+                'mask_file': f'instance_{self.instance_id}.png', 'mask_pixels': int(self.mask.sum()),
+                'centerlines_xy': [p.astype(int).tolist() for p in self.paths_xy],
+                'geometry': self.geometry, 'instance_ambiguous': self.ambiguous,
+                'ambiguity_reasons': list(self.ambiguity_reasons),
+                'identity_scope': 'single_image_mask_hypothesis'}
+
+
+@dataclass
 class WireResult:
     image_bgr: np.ndarray
     mask: np.ndarray
@@ -41,6 +63,10 @@ class WireResult:
     grasp_policy: dict = field(default_factory=dict)
     grasp_plans: list[dict] = field(default_factory=list)
     manual_terminal_annotations: list[dict] = field(default_factory=list)
+    instances: list[WireInstance] = field(default_factory=list)
+    path_instance_ids: list[str] = field(default_factory=list)
+    source_masks: list[np.ndarray] = field(default_factory=list)
+    instance_relations: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -55,6 +81,14 @@ class WireResult:
             "terminal_detections": self.terminal_detections,
             "grasp_policy": self.grasp_policy, "grasp_plans": self.grasp_plans,
             "manual_terminal_annotations": self.manual_terminal_annotations,
+            "wire_instances_schema_version": 1,
+            "instances": [instance.to_dict() for instance in self.instances],
+            "path_instance_ids": self.path_instance_ids,
+            "source_masks": [{'source_mask_id': f'S{i+1:03d}',
+                              'mask_file': f'source_mask_S{i+1:03d}.png'}
+                             for i in range(len(self.source_masks))],
+            "instance_relations": self.instance_relations,
+            "instance_ambiguous": any(instance.ambiguous for instance in self.instances),
         }
 
 
@@ -95,20 +129,62 @@ def _prompt_components(mask: np.ndarray, positives: np.ndarray) -> np.ndarray:
     return np.isin(labels, chosen)
 
 
-def _skeleton_path(mask: np.ndarray, local_extent=34):
-    from skimage.morphology import skeletonize
-
-    skeleton = skeletonize(mask)
+def _skeleton_graph(skeleton):
     yx = np.argwhere(skeleton)
-    if len(yx) < 8:
-        return skeleton, np.empty((0, 2), dtype=int), ["掩码过小，无法估计线材端部"], []
     ids = {tuple(p): i for i, p in enumerate(yx)}
     graph = [[] for _ in yx]
     for i, (y, x) in enumerate(yx):
         for dy, dx in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
-            j = ids.get((y + dy, x + dx))
-            if j is not None:
+            j = ids.get((y+dy, x+dx))
+            # 数字骨架转角的冗余对角边会伪造分叉；真实斜线仍保留对角连接。
+            if j is not None and not (dx and dy and ((y, x+dx) in ids or (y+dy, x) in ids)):
                 graph[i].append((j, 1.41421356 if dx and dy else 1.0))
+    return yx, graph
+
+
+def _instance_geometry(mask, skeleton, path, crop):
+    yx, graph = _skeleton_graph(skeleton)
+    degrees = np.array([len(neighbors) for neighbors in graph])
+    widths = 2*cv2.distanceTransform(mask.astype(np.uint8), cv2.DIST_L2, 5)[skeleton]
+    median = float(np.median(widths)) if len(widths) else 0.0
+    p95 = float(np.percentile(widths, 95)) if len(widths) else 0.0
+    turns = np.array([], float)
+    step = 8
+    if len(path) > 2*step:
+        a, b = path[step:-step]-path[:-2*step], path[2*step:]-path[step:-step]
+        norms = np.linalg.norm(a, axis=1)*np.linalg.norm(b, axis=1)
+        good = norms > 0
+        turns = np.degrees(np.arccos(np.clip((a[good]*b[good]).sum(1)/norms[good], -1, 1)))
+    endpoints = yx[degrees == 1, ::-1]
+    x1, y1, x2, y2 = crop
+    truncated = any(min(x-x1, y-y1, x2-1-x, y2-1-y) <= 4 for x, y in endpoints)
+    reasons = []
+    if np.any(degrees > 2):
+        reasons.append('branch_or_crossing_unresolved')
+    if len(endpoints) != 2:
+        reasons.append('endpoint_count_not_two')
+    if len(graph) and sum(map(len, graph))//2 >= len(graph):
+        reasons.append('skeleton_cycle')
+    if not len(path):
+        reasons.append('centerline_unavailable')
+    if median and p95/median > 2.5:
+        reasons.append('width_inconsistent')
+    if len(turns) and float(turns.max()) > 75:
+        reasons.append('tangent_discontinuity')
+    return {'connected_components': 1, 'skeleton_pixels': len(yx),
+            'endpoint_count': len(endpoints), 'branch_pixels': int((degrees > 2).sum()),
+            'median_width_px': median, 'p95_width_px': p95,
+            'max_tangent_turn_deg': float(turns.max()) if len(turns) else None,
+            'tangent_window_px': step, 'roi_truncated': bool(truncated)}, reasons
+
+
+def _skeleton_path(mask: np.ndarray, local_extent=34):
+    from skimage.morphology import skeletonize
+
+    skeleton = skeletonize(mask)
+    yx, graph = _skeleton_graph(skeleton)
+    if len(yx) < 8:
+        return skeleton, np.empty((0, 2), dtype=int), ["掩码过小，无法估计线材端部"], []
     ends = [i for i, neighbors in enumerate(graph) if len(neighbors) == 1]
     if len(ends) < 2:
         return skeleton, np.empty((0, 2), dtype=int), ["中心线没有两个清晰端点，可能闭合、粘连或分割错误"], []
@@ -182,17 +258,27 @@ def analyze_mask(image_bgr: np.ndarray, mask: np.ndarray, *, score: float = 0,
     x1, y1, x2, y2 = crop_xyxy
     count, components = cv2.connectedComponents(mask.astype(np.uint8), 8)
     skeleton = np.zeros_like(mask)
-    paths, warnings = [], []
+    paths, warnings, instances, path_instance_ids = [], [], [], []
     candidates, end_regions = [], []
     if count > 2:
         warnings.append("掩码包含多段不连通前景，不能据此确认它们属于同一根线材")
     for component_id in range(1, count):
-        part_skeleton, path, part_warnings, local_paths = _skeleton_path(components == component_id, 2 * inset_px + 10)
+        component_mask = components == component_id
+        part_skeleton, path, part_warnings, local_paths = _skeleton_path(component_mask, 2 * inset_px + 10)
         skeleton |= part_skeleton
         warnings.extend(part_warnings)
+        geometry, reasons = _instance_geometry(component_mask, part_skeleton, path, crop_xyxy)
+        geometry['source_connected_components'] = count-1
+        if count > 2:
+            reasons.append('disconnected_source_mask')
+        instance_paths = ([path.copy()] if len(path) else []) + [p.copy() for p in local_paths]
+        instance = WireInstance(f'W{component_id:03d}', 'S001', component_mask.copy(),
+                                instance_paths, geometry, reasons)
+        instances.append(instance)
         if not len(path):
             continue
         paths.append(path)
+        path_instance_ids.append(instance.instance_id)
         total_length = float(np.linalg.norm(np.diff(path, axis=0), axis=1).sum())
         if total_length < 2 * inset_px + 5:
             warnings.append("中心线过短，无法在两端附近给出独立的候选区域")
@@ -217,19 +303,141 @@ def analyze_mask(image_bgr: np.ndarray, mask: np.ndarray, *, score: float = 0,
                 region = _end_region(components == component_id, directed[0], 2 * inset_px)
                 end_regions.append(region)
                 candidates.append({"id": chr(65 + len(candidates)), "component_id": component_id,
+                                   "instance_id": instance.instance_id,
                                    "tip_xy": directed[0].astype(int).tolist(),
                                    "near_tip_xy": directed[i].astype(int).tolist(),
                                    "tangent_xy": axis.tolist(),
                                    "inward_path_xy": directed.astype(int).tolist(),
-                                   "path_ambiguous": bool(local_paths),
+                                   "path_ambiguous": instance.ambiguous or bool(local_paths),
                                    "inset_px": float(distances[i]),
                                    "end_region_pixels": int(region.sum()),
                                    "end_region_extent_px": float(2 * inset_px),
                                    "kind": "geometric_end_candidate", "confirmed": False})
     # 多段中心线不拼接，避免下游误把出画间隙当成一段真实线身。
-    path = paths[0] if len(paths) == 1 else np.empty((0, 2), dtype=int)
+    path = paths[0] if len(paths) == 1 and not any(i.ambiguous for i in instances) else np.empty((0, 2), dtype=int)
     return WireResult(image_bgr.copy(), mask, skeleton, path, candidates, float(score),
-                      float(elapsed_s), crop_xyxy, warnings, target, paths, end_regions)
+                      float(elapsed_s), crop_xyxy, warnings, target, paths, end_regions,
+                      instances=instances, path_instance_ids=path_instance_ids, source_masks=[mask.copy()])
+
+
+def _possible_fragment_link(first, second):
+    if not first.paths_xy or not second.paths_xy:
+        return False
+    a, b = first.paths_xy[0], second.paths_xy[0]
+    if len(a) < 9 or len(b) < 9:
+        return False
+    for path_a in (a, a[::-1]):
+        for path_b in (b, b[::-1]):
+            delta = path_b[0]-path_a[0]
+            distance = np.linalg.norm(delta)
+            if not 0 < distance <= 12:
+                continue
+            va, vb = path_a[0]-path_a[8], path_b[0]-path_b[8]
+            na, nb = np.linalg.norm(va), np.linalg.norm(vb)
+            if (na > 0 and nb > 0 and np.dot(va, delta)/(na*distance) > .8
+                    and np.dot(vb, -delta)/(nb*distance) > .8):
+                return True
+    return False
+
+
+def _same_wire_hypothesis(first, second):
+    """只消除同中心线、同端点的包含式假设；平行线、分叉和断线不作等价。"""
+    if (len(first.instances) != 1 or len(second.instances) != 1
+            or first.instances[0].ambiguous or second.instances[0].ambiguous):
+        return False
+    a, b = first.paths_xy[0], second.paths_xy[0]
+    if min(len(a), len(b))/max(len(a), len(b)) < .95:
+        return False
+    smaller = min(first.mask.sum(), second.mask.sum())
+    if (first.mask & second.mask).sum() < .98*smaller:
+        return False
+    endpoints = min(max(np.linalg.norm(a[0]-b[0]), np.linalg.norm(a[-1]-b[-1])),
+                    max(np.linalg.norm(a[0]-b[-1]), np.linalg.norm(a[-1]-b[0])))
+    if endpoints > 3:
+        return False
+    for source, target in ((a, b), (b, a)):
+        raster = np.ones(first.mask.shape, np.uint8)
+        raster[target[:, 1], target[:, 0]] = 0
+        distance = cv2.distanceTransform(raster, cv2.DIST_L2, cv2.DIST_MASK_PRECISE)[source[:, 1], source[:, 0]]
+        if np.percentile(distance, 95) > .5 or distance.max() > 3:
+            return False
+    return True
+
+
+def analyze_instance_masks(image_bgr, masks, *, scores=None, crop_xyxy=None, inset_px=12):
+    """逐个分析SAM掩码，保留来源与分量；OR只作为显示层，不参与实例归属。"""
+    h, w = image_bgr.shape[:2]
+    crop = list(crop_xyxy or [0, 0, w, h])
+    scores = [0.0]*len(masks) if scores is None else list(scores)
+    if len(scores) != len(masks):
+        raise SegmentationError('独立掩码与评分数量不一致')
+    blank = np.zeros((h, w), bool)
+    result = WireResult(image_bgr.copy(), blank.copy(), blank.copy(), np.empty((0, 2), int),
+                        [], float(np.mean(scores)) if scores else 0.0, 0, crop)
+    result.source_masks = [np.asarray(mask, bool).copy() for mask in masks]
+    retained, duplicates = [], []
+    for source_index in sorted(range(len(masks)), key=lambda i: -scores[i]):
+        mask, score = masks[source_index], scores[source_index]
+        part = analyze_mask(image_bgr, mask, score=score, crop_xyxy=crop, inset_px=inset_px)
+        result.mask |= part.mask
+        same = next((entry for entry in retained if _same_wire_hypothesis(part, entry[0])), None)
+        if same is not None:
+            duplicates.append({'source_mask_id': f'S{source_index+1:03d}', 'retained_source_mask_id': same[1],
+                               'reason': 'same_centerline_endpoints_and_containment'})
+            continue
+        retained.append((part, f'S{source_index+1:03d}'))
+        result.skeleton |= part.skeleton
+        result.warnings.extend(part.warnings)
+        mapping = {}
+        for instance in part.instances:
+            old_id = instance.instance_id
+            instance.instance_id = f'W{len(result.instances)+1:03d}'
+            instance.source_mask_id = f'S{source_index+1:03d}'
+            instance.geometry['sam_score'] = float(score)
+            mapping[old_id] = instance.instance_id
+            result.instances.append(instance)
+        result.paths_xy.extend(part.paths_xy)
+        result.path_instance_ids.extend(mapping[i] for i in part.path_instance_ids)
+        for candidate, region in zip(part.candidates, part.end_regions):
+            candidate['instance_id'] = mapping[candidate['instance_id']]
+            candidate['component_id'] = int(candidate['instance_id'][1:])
+            candidate['id'] = chr(65+len(result.candidates)) if len(result.candidates) < 26 else f'E{len(result.candidates)+1}'
+            result.candidates.append(candidate)
+            result.end_regions.append(region)
+    result.automation['duplicate_wire_hypotheses'] = duplicates
+    boxes = []
+    for instance in result.instances:
+        y, x = np.where(instance.mask)
+        boxes.append([int(x.min()), int(y.min()), int(x.max())+1, int(y.max())+1])
+    for i, first in enumerate(result.instances):
+        for j in range(i+1, len(result.instances)):
+            second = result.instances[j]
+            a, b = boxes[i], boxes[j]
+            if a[2]+12 < b[0] or b[2]+12 < a[0] or a[3]+12 < b[1] or b[3]+12 < a[1]:
+                continue
+            x1, y1 = max(0, min(a[0], b[0])-1), max(0, min(a[1], b[1])-1)
+            x2, y2 = min(w, max(a[2], b[2])+1), min(h, max(a[3], b[3])+1)
+            mask_a, mask_b = first.mask[y1:y2, x1:x2], second.mask[y1:y2, x1:x2]
+            overlap = int((mask_a & mask_b).sum())
+            touching = bool(np.any(cv2.dilate(mask_a.astype(np.uint8), np.ones((3, 3), np.uint8)) & mask_b))
+            reason = ('touch_or_crossing_unresolved' if touching else
+                      'possible_fragment_continuation' if _possible_fragment_link(first, second) else None)
+            if reason:
+                result.instance_relations.append({'instance_ids': [first.instance_id, second.instance_id],
+                                                  'kind': reason, 'overlap_pixels': overlap})
+                for instance in (first, second):
+                    if reason not in instance.ambiguity_reasons:
+                        instance.ambiguity_reasons.append(reason)
+    owners = {i.instance_id: i for i in result.instances}
+    for candidate in result.candidates:
+        owner = owners[candidate['instance_id']]
+        candidate['path_ambiguous'] = candidate['path_ambiguous'] or owner.ambiguous
+        candidate['instance_ambiguity_reasons'] = list(owner.ambiguity_reasons)
+    if len(result.paths_xy) == 1 and not any(i.ambiguous for i in result.instances):
+        result.centerline_xy = result.paths_xy[0].copy()
+    if any(i.ambiguous for i in result.instances):
+        result.warnings.append('存在实例歧义：接触/交叉、断线或异常几何不能仅凭像素连通确定归属')
+    return result
 
 
 class Sam2WireSegmenter:
@@ -339,8 +547,13 @@ class Sam2WireSegmenter:
         _, score, selected = max(choices, key=lambda row: row[0])
         mask = np.zeros((h, w), dtype=bool)
         mask[cy1:cy2, cx1:cx2] = selected
-        return analyze_mask(image_bgr, mask, score=score, elapsed_s=time.perf_counter() - t0,
-                            crop_xyxy=crop_box, inset_px=float(self.cfg.get_path("wire.inset_px", 12)), target=target)
+        result = analyze_mask(image_bgr, mask, score=score, elapsed_s=time.perf_counter() - t0,
+                              crop_xyxy=crop_box, inset_px=float(self.cfg.get_path("wire.inset_px", 12)), target=target)
+        result.automation = {'method': 'manual_prompts', 'manual_prompts': True,
+                             'coordinate_space': 'original_rgb_pixels',
+                             'prompts': {'box': None if box is None else list(map(float, box)),
+                                         'points': points.tolist(), 'labels': labels.tolist()}}
+        return result
 
 
 def draw_result(result: WireResult) -> np.ndarray:
@@ -350,6 +563,13 @@ def draw_result(result: WireResult) -> np.ndarray:
     vis[result.mask] = (vis[result.mask] * 0.40 + tint[result.mask] * 0.60).astype(np.uint8)
     contours, _ = cv2.findContours(result.mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     cv2.drawContours(vis, contours, -1, (0, 255, 255), 1)
+    for instance in result.instances:
+        if instance.paths_xy:
+            path = instance.paths_xy[0]
+            anchor = tuple(path[len(path)//2].astype(int))
+            label = instance.instance_id + ('?' if instance.ambiguous else '')
+            cv2.putText(vis, label, anchor, cv2.FONT_HERSHEY_SIMPLEX, .45,
+                        (0, 80, 255) if instance.ambiguous else (255, 255, 0), 1)
     for region in result.end_regions:
         vis[region] = (vis[region] * 0.2 + np.array([0, 255, 0]) * 0.8).astype(np.uint8)
     vis[result.skeleton] = (255, 0, 255)
@@ -389,6 +609,12 @@ def draw_result(result: WireResult) -> np.ndarray:
 def save_result(result: WireResult, out: str | Path) -> Path:
     out = Path(out)
     out.mkdir(parents=True, exist_ok=False)
+    for instance in result.instances:
+        if not cv2.imwrite(str(out/f'instance_{instance.instance_id}.png'), instance.mask.astype(np.uint8)*255):
+            raise OSError('独立实例掩码保存失败')
+    for index, mask in enumerate(result.source_masks):
+        if not cv2.imwrite(str(out/f'source_mask_S{index+1:03d}.png'), mask.astype(np.uint8)*255):
+            raise OSError('独立SAM来源掩码保存失败')
     for name, img in (("color.png", result.image_bgr), ("mask.png", result.mask.astype(np.uint8) * 255),
                       ("skeleton.png", result.skeleton.astype(np.uint8) * 255), ("overlay.png", draw_result(result)),
                       *[(f"end_region_{c['id']}.png", region.astype(np.uint8) * 255)

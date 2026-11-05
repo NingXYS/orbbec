@@ -57,28 +57,28 @@ def test_nominal_tool_can_plan_but_cannot_execute():
     assert spec['status'] == 'plan_only'
     assert spec['planning_allowed'] is True
     assert spec['execution_allowed'] is False
-    assert spec['execution_blockers'] == [NOMINAL_TOOL_BLOCKER]
+    assert spec['execution_blockers'] == [NOMINAL_TOOL_BLOCKER, 'visual_path_validation_missing', 'execution_source_missing']
     assert [stage['name'] for stage in spec['stages']] == ['pregrasp', 'grasp', 'lift']
     assert spec['pregrasp_clearance_m'] == pytest.approx(0.03)
 
 
-def test_user_can_explicitly_authorize_nominal_urdf_tool_execution():
+def test_nominal_tool_authorization_does_not_bypass_new_visual_gate():
     spec = build_motion_spec(
         recognition([NOMINAL_TOOL_BLOCKER]),
         allow_nominal_urdf_tool=True,
     )
-    assert spec['status'] == 'moveit_ready'
-    assert spec['execution_allowed'] is True
-    assert spec['execution_blockers'] == []
+    assert spec['status'] == 'plan_only'
+    assert spec['execution_allowed'] is False
+    assert spec['execution_blockers'] == ['visual_path_validation_missing', 'execution_source_missing']
     assert spec['nominal_urdf_tool_execution_authorized'] is True
     assert 'nominal_urdf_tool_execution_authorized_by_user' in spec['warnings']
 
 
-def test_measured_tool_with_no_blockers_is_execution_ready():
+def test_legacy_measured_tool_without_visual_evidence_is_plan_only():
     spec = build_motion_spec(recognition())
-    assert spec['status'] == 'moveit_ready'
-    assert spec['execution_allowed'] is True
-    assert spec['execution_blockers'] == []
+    assert spec['status'] == 'plan_only'
+    assert spec['execution_allowed'] is False
+    assert spec['execution_blockers'] == ['visual_path_validation_missing', 'execution_source_missing']
     assert spec['stages'][0]['pose']['position']['z'] == pytest.approx(0.1415)
     assert spec['stages'][1]['pose']['position']['z'] == pytest.approx(0.1715)
     assert spec['stages'][0]['pose']['orientation']['w'] == pytest.approx(1.0)

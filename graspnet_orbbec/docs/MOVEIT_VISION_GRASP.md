@@ -22,7 +22,7 @@
 
 - 指定的 `grasp_plans[]` 状态为 `base_frame_preview_ready`；
 - 已人工确认金属/绝缘交界；
-- 当前 RGB 中棋盘平面可用，线材中心相对棋盘高度已测量；
+- 当前RGB棋盘平面或安装关系未变的固定桌面平面可用，线材中心相对棋盘高度及局部平行关系已重新核实；
 - `surface_projection_only=false`；
 - `tcp_compensation_applied=true`；
 - 具有 `T_base_flange_grasp` 和 `T_base_flange_pregrasp`；
@@ -37,18 +37,7 @@
 
 [Piper X 视觉抓取真机启动手册](REAL_GRASP_STARTUP.md)
 
-当前已验证的冻结识别结果：
-
-```bash
-recognition="output/wire_grasp/real_20261103_164546_base-12_grasp135_01/recognition.json"
-candidate_id="A"
-
-scripts/run_moveit_wire_grasp.sh \
-  --recognition "$recognition" \
-  --candidate-id "$candidate_id"
-```
-
-只有规划成功、目标报告 `execution_allowed=true`，并完成手动使能和状态检查后，才可追加 `--execute`。
+日常操作只使用本次新快照及人工确认的候选；启动、环境配置、只规划和可选执行命令统一见上述主手册。旧快照与特定候选的说明移至[历史冻结结果复核](REAL_GRASP_HISTORY.md)。执行许可须查看规划报告的 `motion_spec.execution_allowed` 和 `motion_spec.execution_blockers`，不能仅凭控制器或规划返回成功执行。
 
 报告默认写到新的 `output/wire_grasp/moveit_<timestamp>_<candidate>/report.json`。
 
@@ -84,3 +73,7 @@ scripts/run_moveit_wire_grasp.sh \
 - MoveIt 规划场景目前没有由本适配层自动加入桌面、支架、线材和相机外形；碰撞规划只使用现有 MoveIt scene。
 - 手眼 PARK 解的固定标定残差约 5.4 mm，不是独立绝对精度验收。执行容差 3 mm 表示规划/到位门槛，不代表视觉物理精度优于 5.4 mm。
 - 当前 2026-11-03 的 `vision_moveit_20261103_recognition_01` 没有 `base_frame_preview_ready` 目标，因此不会产生运动。需要重新布置棋盘、确认唯一端子和测量高度。
+
+## 局部路径门控（2026-11-04）
+
+执行资格增加独立的[视觉路径复核](VISUAL_PATH_VALIDATION.md)。旧JSON可分析，但缺少新证据时只允许规划；名义工具授权不绕过此门控，历史目标资格变化见[兼容性报告](VISUAL_PATH_COMPATIBILITY.md)。

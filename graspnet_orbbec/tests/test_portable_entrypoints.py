@@ -37,6 +37,9 @@ def portable_launch(tmp_path):
     text = text.replace('/opt/ros/humble/bin/ros2', shlex.quote(str(recorder)))
     text = text.replace('source /opt/ros/humble/setup.bash', 'source ' + shlex.quote(str(ros / 'setup.bash')))
     text = text.replace('/tmp/piper_x_official_can0.lock', shlex.quote(str(lock)))
+    flags = tmp_path / 'can_flags'
+    flags.write_text('0x1\n')
+    text = text.replace('/sys/class/net/can0/flags', shlex.quote(str(flags)))
     target.write_text(text)
     return target, ws, lock
 
@@ -82,3 +85,14 @@ def test_relocated_launch_keeps_single_instance_lock(portable_launch, tmp_path):
         )
     assert result.returncode == 2
     assert '会话已在运行' in result.stderr
+
+
+def test_launch_rejects_can_down_before_ros(portable_launch, tmp_path):
+    target, _, _ = portable_launch
+    (tmp_path / 'can_flags').write_text('0x40080\n')
+    result = subprocess.run(
+        ['/bin/bash', str(target)], cwd=tmp_path, capture_output=True, text=True,
+    )
+    assert result.returncode == 2
+    assert 'can0尚未启用' in result.stderr
+    assert not (target.parent / 'runtime').exists()

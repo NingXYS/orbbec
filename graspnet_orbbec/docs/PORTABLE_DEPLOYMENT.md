@@ -2,11 +2,7 @@
 
 `orbbec/` 与 `PIPER X/` 保持同级，父目录和用户名可以变化。正式启动脚本按自身位置解析官方工作空间；标定绑定以 `graspnet_orbbec` 根目录解析 `../../PIPER X/hand-eye-calibration`。相对命令行参数仍以当前工作目录为准，不要求从旧路径启动。
 
-每个操作终端先进入新的 `orbbec` 根目录，再执行：
-
-```bash
-orbbec_root="$(pwd -P)"
-```
+当前电脑的入口目录为 `~/orbbec`，启动前先执行 `cd ~/orbbec`。迁移后按新位置调整该命令。操作手册中，终端 A 在工程根目录启动；终端 B 加载ROS后进入 `graspnet_orbbec`。不需要设置 `orbbec_root` 变量。
 
 具体真机步骤见 [启动手册](REAL_GRASP_STARTUP.md)。正式入口与抓取适配分别是 `bringup/piper_x/start_real_control.sh` 和 `graspnet_orbbec/scripts/run_moveit_wire_grasp.sh`。
 

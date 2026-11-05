@@ -191,6 +191,12 @@ class WireHandeyeBridge:
         self.support_confirmed = support_relation_confirmed
         self.installation_confirmed = installation_confirmed
         self.tool = read_json(tool_file) if tool_file else None
+        from arm.source_validation import SNAPSHOT_FILES
+        self.source_files = {name: sha256(self.snapshot/name) for name in SNAPSHOT_FILES}
+        def file_contract(path):
+            return None if path is None else {'path': str(Path(path).resolve(strict=True)), 'sha256': sha256(path)}
+        self.source_tool = file_contract(tool_file)
+        self.source_plane = file_contract(fixed_plane_file)
         self.plane_error = None
         if fixed_plane_file is not None:
             self.plane = fixed_plane_in_camera(
@@ -239,6 +245,7 @@ class WireHandeyeBridge:
             tool_transform = rigid_transform(self.tool['T_flange_grasp'])
         base_z_offset_m = getattr(self, 'base_z_offset_m', 0.0)
         for plan in result.grasp_plans:
+            plan['readiness_blockers'] = list(dict.fromkeys(plan.get('readiness_blockers', [])+blockers))
             if plan['status'] != 'camera_frame_preview_ready':
                 continue
             base_correction = np.eye(4)
@@ -250,14 +257,24 @@ class WireHandeyeBridge:
                         center_height_over_board_m=self.height,
                         base_z_offset_m=base_z_offset_m,
                         surface_projection_only=self.height is None or not self.support_confirmed,
-                        readiness_blockers=list(blockers), robot_pose_valid=False,
+                        readiness_blockers=plan['readiness_blockers'], robot_pose_valid=False,
                         executable=False)
+            plan['verification_stages']['coordinate_calculation_succeeded'] = True
+            plan['coordinate_verification'] = {
+                'T_base_rgb': (base_correction @ self.t_base_flange @ self.bundle.t_flange_rgb).tolist(),
+                'K': self.bundle.k.tolist(), 'D': self.bundle.d.tolist(),
+                'T_flange_grasp': tool_transform.tolist() if tool_transform is not None else None}
         result.grasp_policy.update(
             metric_source='current_rgb_board_plane_with_measured_height',
             robot_pose_valid=False, motion_commands_enabled=False,
             handeye=self.bundle.info(), support_plane=self.plane,
             support_plane_error=self.plane_error,
             base_z_offset_m=base_z_offset_m,
+            center_height_over_board_m=self.height,
             capture_snapshot=str(self.snapshot), readiness_blockers=blockers,
+            visual_readiness_by_candidate={p['candidate_id']: p['readiness_blockers'] for p in result.grasp_plans},
             interpretation='冻结快照的基座坐标预览；未检查碰撞/可达性，不能直接下发机器人')
+        from arm.source_validation import snapshot_provenance
+        result.grasp_policy['source_provenance'] = snapshot_provenance(self)
+        result.grasp_policy['data_origin'] = getattr(self, 'pair', {}).get('data_origin', 'unknown')
         return result

@@ -35,6 +35,15 @@ def parser():
     fixed.add_argument('--base-z-offset-mm', type=float, default=0.0)
     capture = commands.add_parser('capture', help='停稳后采RGB/被动法兰反馈，不发送机器人命令')
     capture.add_argument('--out', type=Path)
+    capture.add_argument('--frames', type=int, choices=range(1, 11), default=1,
+                         help='1保留原单帧；2至10独立采集多帧，推荐5至10')
+    capture.add_argument('--scene-stationary-confirmed', action='store_true',
+                         help='多帧采集前确认机器人、相机、桌面和线材保持静止')
+    capture.add_argument('--scene-roi', nargs=4, type=int, metavar=('X1', 'Y1', 'X2', 'Y2'),
+                         help='可见静止检查区域，需覆盖目标线材和固定背景，默认整幅RGB')
+    sequence = commands.add_parser('verify-sequence', help='只读复核已有多帧manifest，不打开设备')
+    sequence.add_argument('--snapshot', type=Path, required=True)
+    sequence.add_argument('--allow-simulated', action='store_true', help='仅用于明确标记的离线测试序列')
     for command in ('preview', 'recognize'):
         sub = commands.add_parser(command, help='配对快照自动识别；preview打开交界确认窗口')
         sub.add_argument('--snapshot', type=Path, required=True)
@@ -98,8 +107,23 @@ def main():
     if args.command == 'capture':
         from arm.stationary_capture import capture_snapshot
         out = args.out or ROOT/'output/wire_grasp'/datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+        if args.frames > 1:
+            from arm.stationary_sequence import capture_stationary_sequence
+            print('多帧独立采图及连续只读反馈检查：全程保持机器人、相机和线材静止，不发送运动。', flush=True)
+            saved = capture_stationary_sequence(bundle, out, frames=args.frames,
+                                                scene_stationary_confirmed=args.scene_stationary_confirmed,
+                                                scene_roi=args.scene_roi)
+            print(f'多帧序列已保存：{saved}')
+            return 0
+        if args.scene_roi is not None or args.scene_stationary_confirmed:
+            raise ValueError('多帧静止参数仅用于--frames大于1；单帧保持原采集合同')
         print('请保持机械臂、相机和线材静止，约4秒。仅被动读取CAN，不使能或运动。', flush=True)
         print(f'配对快照已保存：{capture_snapshot(bundle, out)}')
+        return 0
+    if args.command == 'verify-sequence':
+        from arm.stationary_sequence import verify_stationary_sequence
+        report = verify_stationary_sequence(bundle, args.snapshot, allow_simulated=args.allow_simulated)
+        print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0
     if args.command == 'fit-tcp':
         transforms = []

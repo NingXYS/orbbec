@@ -16,7 +16,7 @@ import numpy as np
 from capture.color_camera import FileColorCamera as FileCamera, open_color_camera as open_camera
 from common.paths import OUTPUT_DIR
 from segmentation.wire import Sam2WireSegmenter, draw_result, save_result
-from segmentation.grasp_policy import apply_grasp_policy, confirm_boundary, confirm_body_boundary
+from segmentation.grasp_policy import apply_grasp_policy, confirm_boundary, confirm_body_boundary, confirm_manual_mask
 from vlm.target_locator import put_cjk
 
 
@@ -129,6 +129,11 @@ def render_canvas(live, state):
     details=review_lines(state.result) if state.result is not None else []
     canvas = np.full((h + 174 + len(details)*25, w * 2, 3), 30, dtype=np.uint8)
     left = (state.source if state.source is not None else live).copy()
+    roi = getattr(state.result, 'crop_xyxy', None)
+    roi_active = roi is not None and list(roi) != [0, 0, w, h]
+    if roi_active:
+        x1, y1, x2, y2 = roi
+        cv2.rectangle(left, (x1, y1), (x2-1, y2-1), (255, 180, 0), 1)
     if state.box is not None:
         cv2.rectangle(left, tuple(state.box[:2]), tuple(state.box[2:]), (255, 220, 0), 1)
     for p, label in zip(state.points, state.labels):
@@ -136,12 +141,16 @@ def render_canvas(live, state):
     canvas[64:64 + h, :w] = left
     if state.result is not None:
         canvas[64:64 + h, w:] = draw_result(state.result)
+        if roi_active:
+            cv2.rectangle(canvas, (w+x1, 64+y1), (w+x2-1, 64+y2-1), (255, 180, 0), 1)
     title = "识别原图（已冻结）" if state.source is not None else ("最近画面（取流中断）" if state.camera_error else "实时原图")
+    if roi_active:
+        title += ' · ROI已限制'
     put_cjk(canvas, title, (10, 30), size=20)
     put_cjk(canvas, "SAM2 掩码 / 端点 / 夹持中心预览（原图快照）", (w + 10, 30), size=18)
     controls=('离线：Shift交界 | T端子轮廓 / 右键撤点 / Enter闭合 | Y人工确认 | Z放大 | S保存 | R重识别 | Q退出'
-              if state.offline_review else 'R：自动识别 | Shift+左键：确认交界 | 拖框/点选纠正 | 空格/C：实时 | S：保存 | Q：退出')
-    put_cjk(canvas,controls,(10,h+92),size=15 if state.offline_review else 18)
+              if state.offline_review else '左键：线身正点 | 右键：背景负点 | V：复核线身 | Shift+左键：交界 | R：自动 | C：清除 | S：保存 | Q：退出')
+    put_cjk(canvas,controls,(10,h+92),size=15)
     put_cjk(canvas, (state.camera_error or state.message)[:100], (10, h + 120), color=(0, 220, 255), size=18)
     warning = state.result.warnings[0] if state.result is not None and state.result.warnings else "A/B为几何候选；青色T为端子模型检测，仍需确认；仅输出二维像素位置"
     if state.result is not None and state.result.grasp_policy:
@@ -193,7 +202,9 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
                 if handeye_bridge is not None:
                     handeye_bridge.apply(state.result, cfg)
                 plan = next(p for p in state.result.grasp_plans if p['candidate_id'] == chosen)
-                if plan['status'] == 'wire_instance_ambiguous':
+                if 'visual_path_manual_mask_review_required' in plan.get('readiness_blockers', []):
+                    state.message = f'{chosen}交界已记录；请检查目标线身掩码，无粘连/交叉后按V单独复核'
+                elif plan['status'] == 'wire_instance_ambiguous':
                     state.message = f'{chosen}交界已记录；请先分开粘连线材，路径存在歧义'
                 elif plan['status'] == 'base_frame_preview_ready':
                     xyz = np.asarray(plan['grasp_base_m']) * 1000
@@ -204,9 +215,6 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
             except ValueError as exc:
                 state.message = str(exc)
             print(state.message, flush=True)
-            return
-        if handeye_bridge is not None and event in (cv2.EVENT_LBUTTONDOWN, cv2.EVENT_RBUTTONDOWN):
-            state.message = '手眼确认模式：请按住Shift再左键点交界；R重新自动识别，S保存'
             return
         if event == cv2.EVENT_LBUTTONUP and drag_start is not None:
             origin, drag_start = drag_start, None
@@ -242,7 +250,7 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
             input_channel.start_stdin()
         cv2.namedWindow(window, cv2.WINDOW_AUTOSIZE)
         cv2.setMouseCallback(window, mouse)
-        print("线材识别窗口已打开：R自动识别；Shift+左键确认金属/绝缘交界。空格/C恢复实时，S保存，Q退出。", flush=True)
+        print("线材识别窗口已打开：R自动识别；左键在线身补正点、右键背景补负点；纠正后V复核线身，再Shift+左键确认交界。C清除，S保存，Q退出。", flush=True)
         if args.wire_auto:
             state.message = "相机预热后自动取一帧识别，无需框选…"
             print(state.message, flush=True)
@@ -291,16 +299,20 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
                         if handeye_bridge is not None:
                             try:
                                 handeye_bridge.apply(result, cfg)
-                                state.message += '；手眼快照已绑定，Shift+左键确认交界计算基座坐标'
+                                state.message += '；手眼快照已绑定'
                             except ValueError as exc:
                                 state.message = f'手眼定位拒绝：{exc}'
                                 print(state.message, flush=True)
-                        if result.automation:
+                        if result.automation.get('method') == 'manual_prompts':
+                            state.message += '；检查掩码只含目标线身且无粘连/交叉，V复核后Shift点交界'
+                            print(f'本次手动纠正 {result.elapsed_s:.3f}s；未重新运行端子模型', flush=True)
+                        elif result.automation:
                             state.message += f"；端子模型检出 {len(result.terminal_detections)} 个"
                             guided = result.automation.get('terminal_guided_candidates', [])
                             if guided:
                                 state.message += f"；YOLO自动交界 {','.join(guided)}"
                             print(f'本次自动识别 {result.elapsed_s:.3f}s；{result.automation.get("sampling", {}).get("seed_count", "?")} 个自动提示', flush=True)
+                        print(state.message, flush=True)
                         for item in result.candidates:
                             print(f"端点{item['id']}: {item['tip_xy']} 像素；夹持中心策略为交界后退{result.grasp_policy['offset_mm']:g}mm（待确认交界/三维尺度）", flush=True)
                         for item in result.terminal_detections:
@@ -343,6 +355,18 @@ def run(cfg, args, input_channel, handeye_bridge=None, offline_session=None):
                 state.message = '正在重新取景…'
                 capture_pending = True
                 capture_at = time.monotonic() + 0.15
+            if key == ord('v'):
+                capture_pending, drag_start = False, None
+                try:
+                    if state.result is None:
+                        raise ValueError('请先在线身补正点，等待手动分割完成后再按V')
+                    instance_id = confirm_manual_mask(state.result, cfg)
+                    if handeye_bridge is not None:
+                        handeye_bridge.apply(state.result, cfg)
+                    state.message = f'{instance_id}线身已人工复核；Shift+左键点真实金属/绝缘交界。修改提示后需重新复核'
+                except ValueError as exc:
+                    state.message = str(exc)
+                print(state.message, flush=True)
             if key == ord("s"):
                 if state.result is None:
                     image = state.source if state.source is not None else (latest if fresh else None)

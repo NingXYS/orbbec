@@ -105,6 +105,29 @@ wire:
     offset_mm: 14        # 新离线任务从原始交界总后退14mm；10mm仅保留历史比较
   auto:
     method: line_prompts
+    # 037K当前固定摆位；换视角需重选，设null恢复全图，禁止按窗口截图尺寸缩放。
+    roi_xyxy: [40, 160, 555, 218]
+    roi_reference_size_wh: [640, 480]
+    seed_filter:
+      enabled: false       # 默认兼容；区域只约束自动正点，不裁掉分割结果。
+      coordinate_space: original_rgb  # original_rgb | roi；矩形为半开整数xyxy。
+      search_regions: null # null搜索整个ROI；[]不搜索；多个矩形取并集。
+      exclude_regions: []  # 在搜索区域内扣除，仅限制提示点。
+    seed_debug:
+      enabled: false
+      directory: output/wire_seeds  # 相对graspnet_orbbec；每次推理独占子目录。
+    negative_prompts:
+      enabled: false        # 正式流程保持原正点模式；实验配置显式开启。
+      coordinate_space: original_rgb
+      trusted_regions: []   # 仅填写确认没有线材的背景矩形；空列表自动回退正点。
+      max_points: 2
+      min_distance_px: 12
+      max_distance_px: 80
+      wire_clearance_px: 6
+      max_contrast: 6
+      patch_radius_px: 2
+      max_patch_range: 8
+      spacing_px: 12
     max_seeds: 64
     seed_spacing_px: 32
     min_contrast: 12
@@ -125,6 +148,13 @@ wire:
     terminal_label: 线材金属端子
     terminal_confidence: 0.4
     terminal_path_max_distance_px: 12
+    terminal_match:
+      max_gap_px: 6
+      endpoint_zone_px: 24
+      max_axis_angle_deg: 35
+      min_aspect_ratio: 1.5
+      min_score: 0.55
+      ambiguity_margin: 0.15
     terminal_auto_boundary: false
     terminal_use_seeds: false
 

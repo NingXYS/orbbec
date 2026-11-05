@@ -2,7 +2,7 @@
 
 当前目标是识别可见线身和端子头附近的区域。`--wire` 在现有 OpenCV 入口中启用 SAM2 模式，不加载 GraspNet 抓取网络，不连接机械臂。原有 GraspNet 点名流程仍通过不带 `--wire` 的命令运行。
 
-初始夹持策略现为**金属/绝缘交界后沿线身 10 mm**，闭合方向垂直于局部线材；使用 Shift+左键确认交界，详见 [WIRE_GRASP_POLICY.md](WIRE_GRASP_POLICY.md)。没有真实尺度时仅保存策略，不把像素位置当作毫米夹持中心。
+当前默认夹持策略为**金属/绝缘交界后沿线身总计14 mm**，闭合方向垂直于局部线材；使用 Shift+左键确认交界，真机流程见[日常手册](REAL_GRASP_STARTUP.md)。没有真实尺度时仅保存策略，不把像素位置当作毫米夹持中心。
 
 ## 启动与交互
 
@@ -56,6 +56,7 @@ python scripts/run_live_gui.py --wire --no-target
 
 - 在左侧原图**拖框圈住线材**，松开后分割；框只是提示，输出为真实像素掩码。
 - 左键点击线身增加前景点；右键点击桌面/其他线材增加背景点。重新拖框会清空此前点提示。
+- 手动纠正后核对掩码只含目标线身，无粘连/交叉，按V单独复核，再Shift确认交界；修改提示后须重做复核。手眼预览同样支持这些操作。原图/实例掩码的复核绑定及限制见[手动纠正说明](MANUAL_WIRE_CORRECTION.md)。
 - 第一次点选会冻结提示原图。右侧始终显示同一张原图的结果，防止移动相机后旧掩码错贴新画面。
 - 空格或 `C` 清除提示、结果并恢复实时画面；开始下一轮需要重新拖框或点选。
 - `S` 保存；识别失败或还没有结果时，会将真实原图和诊断信息保存至 `output/wire_debug/`，方便复现漏分。`Q` / ESC 退出。首次分割要加载模型，后续复用同一个模型。
@@ -120,3 +121,15 @@ python scripts/run_live_gui.py --wire --no-target \
 ```bash
 PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .conda/bin/python -m pytest tests/test_wire_segmentation.py -q
 ```
+
+## 自动正点搜索与排除区域
+
+原自动种子算法默认保持兼容。可配置的种子区域、ROI坐标合同、调试输出和纯离线A/B工具见 [SAM2自动正点区域说明](WIRE_SEED_REGIONS.md)。区域只限制提示点，不裁切最终线材掩码；不改变YOLO、14mm抓取策略或机械臂控制。
+
+## 多线材实例与歧义
+
+独立来源掩码、实例ID、中心线、接触/交叉阻断及recognition.json扩展见 [实例schema说明](WIRE_INSTANCES.md)。GUI合成掩码只用于显示，人工确认不能解除实例歧义。
+
+## 端子与线材实例语义关联
+
+YOLO结果按具体实例评估距离、切线及局部连接；不确定时保留歧义，不能单独生成执行许可。配置、证据schema及限制见 [端子实例关联说明](TERMINAL_INSTANCE_ASSOCIATION.md)。

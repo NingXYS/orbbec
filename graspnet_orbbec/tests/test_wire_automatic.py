@@ -131,7 +131,7 @@ def test_terminal_evidence_only_attaches_to_overlapping_end():
     assert not result.to_dict()['terminal_semantics_verified']
 
 
-def test_yolo_terminal_mask_creates_boundary_candidate_on_main_centerline():
+def test_nearby_model_detection_on_wire_interior_does_not_force_boundary():
     image, mask = scene()
     result = analyze_mask(image, mask)
     result.candidates, result.end_regions = [], []
@@ -142,15 +142,11 @@ def test_yolo_terminal_mask_creates_boundary_candidate_on_main_centerline():
         'mask_file': 'terminal_T1.png',
     }]
     result.terminal_masks = [terminal]
-    suggestions = attach_terminal_guided_boundaries(result, Config())
-    assert len(suggestions) == 1
-    candidate = result.candidates[0]
-    assert candidate['kind'] == 'terminal_model_guided_boundary_path'
-    assert candidate['terminal_status'] == 'model_detected'
-    assert candidate['confirmed'] is True
-    assert candidate['terminal_model_evidence'][0]['id'] == 'T1'
-    assert np.linalg.norm(np.asarray(candidate['tip_xy']) - [301, 180]) <= 8
-    assert len(candidate['inward_path_xy']) >= 12
+    suggestions = attach_terminal_guided_boundaries(
+        result, Config({'wire': {'auto': {'terminal_auto_boundary': True}}}))
+    assert not suggestions and not result.candidates
+    match = result.terminal_detections[0]['wire_association']['matches'][0]
+    assert 'terminal_not_near_wire_end' in match['rejection_reasons']
 
 
 def test_auto_pipeline_needs_no_box_points_or_network(tmp_path):

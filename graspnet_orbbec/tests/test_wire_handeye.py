@@ -225,7 +225,8 @@ def test_missing_height_is_explicit_surface_projection_and_never_executable(bund
     assert plan['status'] == 'base_frame_preview_ready'
     assert plan['surface_projection_only']
     assert plan['grasp_base_m'] is not None
-    assert len(plan['readiness_blockers']) == 3
+    assert len(plan['readiness_blockers']) == 4
+    assert 'visual_path_instance_missing' in plan['readiness_blockers']
     assert not plan['executable'] and not plan['robot_pose_valid']
     changed = make_result(np.ones_like(bridge.image))
     with pytest.raises(ValueError, match='跨快照'):
@@ -243,7 +244,7 @@ def test_measured_tool_produces_compensated_flange_preview_only(bundle):
     apply_grasp_policy(result, cfg, {'A': [320, 240]})
     bridge.apply(result, cfg)
     plan = result.grasp_plans[0]
-    assert plan['readiness_blockers'] == []
+    assert plan['readiness_blockers'] == ['visual_path_instance_missing']
     assert plan['tcp_compensation_applied']
     assert not plan['surface_projection_only']
     assert not plan['executable']

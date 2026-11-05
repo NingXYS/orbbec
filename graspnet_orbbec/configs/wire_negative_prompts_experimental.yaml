@@ -1,0 +1,151 @@
+# 自动SAM2正负点实验；完整配置，不修改正式默认文件。
+# GraspNet-baseline 默认配置（采集设备：DaBai DC1）
+camera:
+  backend: dabai_dc1     # dabai_dc1 | gemini336l | astra | auto | file
+  serial: CC1N162037K    # 打开后核验实际序列号，避免混用另一台相机的参数
+  align_mode: HW        # 仅接受 SDK 硬件 D2C，不用 resize 冒充配准
+  color_width: 640
+  color_height: 480
+  color_format: MJPG
+  color_fps: 30
+  depth_width: 640      # 原始流 640x400；D2C 后输出 640x480
+  depth_height: 400
+  depth_format: Y11     # SDK 解包后的实际帧为 uint16/Y16
+  depth_fps: 30
+  laser: true           # 采集期间开启发射器；退出恢复之前的开关状态
+  min_depth_m: 0.30
+  max_depth_m: 2.50
+  timeout_ms: 2000
+  startup_timeout_ms: 10000
+  warmup_frames: 8
+  max_receive_delta_ms: 100  # 仅筛选主机接收差，DC1 不支持曝光同步
+
+workspace:
+  z_min: 0.30            # DC1 初始近裁；实际工作距离需真机验证
+  z_max: 1.80            # 工作距上限；点云在此之外不进 GraspNet
+  use_table_plane: true
+  table_inlier_dist: 0.010  # 1280x800 深度更密，平面内点阈值略收
+  height_min_m: 0.006    # 桌面以上保留点的最小高度
+  height_max_m: 0.30     # 桌面以上保留点的最大高度
+  roi_margin_px: 20      # 640 宽画面，避开 D2C 边缘空洞
+  plane_sample_n: 12000  # 高分辨率下 RANSAC 子集，避免 1280x800 拖慢推理
+  plane_reuse_frames: 8  # 连续推理复用桌面平面，少做 RANSAC
+
+graspnet:
+  checkpoint: weights/checkpoint-rs.tar
+  num_point: 20000       # 网络输入点数不变；从更密的 1280x800 云里采样
+  num_view: 300
+  collision_thresh: 0.01
+  voxel_size: 0.008      # 碰撞体素随高分辨率略加密（旧相机 0.01）
+  collision_max_points: 40000  # 碰撞云规模对齐旧 640x480 量级
+  display_voxel: 0.004   # 可视化下采样；1280x800 比 640x480 更密
+  top_k: 50
+  seed: 42
+
+filter:
+  max_approach_angle_deg: 70   # 接近方向与桌面法向夹角
+  min_height_above_table_m: 0.008
+  max_height_above_table_m: 0.25
+  min_width_m: 0.01
+  max_width_m: 0.10
+  min_score: 0.05
+
+viz:
+  width: 1280
+  height: 720
+  gripper_count: 50
+  point_size: 2.0
+
+vlm:
+  base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+  # 旧 Qwen3-VL 快照已下线，固定官方推荐替代模型的版本。
+  model: qwen3.6-flash-2026-04-16
+  timeout_s: 5.0
+  max_retries: 2          # 解析/网络失败最多再试 2 次
+  temperature: 0.0
+  max_tokens: 256
+  enable_thinking: false
+  jpeg_quality: 85
+  max_side: 1280          # 长边上限，控延迟
+  coord_space: norm1000   # bbox 约定 0–1000 相对坐标，客户端再映射到像素
+  response_format: json_object
+  system_prompt: |
+    你是桌面目标检测器。只输出一个 JSON 对象，不要 markdown，不要解释，不要思考过程。
+    格式必须是：
+    {"found": true, "bbox_2d": [x1, y1, x2, y2]}
+    或
+    {"found": false, "bbox_2d": [0, 0, 0, 0]}
+    bbox_2d 为相对坐标，范围 0 到 1000，[x1,y1] 左上、[x2,y2] 右下。
+    目标不在图中时 found 必须为 false。禁止把颜色相近的小装饰、贴纸、屏幕内容或远处杂物当成目标。
+    只框用户指定的那一个目标本身的最小外接矩形，不要包含桌面、其它物体或大片背景。
+  user_prompt: "目标：{target}"
+
+locator:
+  min_depth_m: 0.12
+  max_depth_m: 3.50
+  min_valid_points: 50     # 少于此数视为空洞，明确报错
+  bbox_shrink: 0.08        # 向内收缩，减少框边背景
+  depth_band_m: 0.06       # 只取中位数深度 ±6 cm 的点
+  max_locate_ms: 50
+
+live:
+  vlm_timeout_s: 10        # 点名 API 硬超时，断网不卡死
+  vlm_max_retries: 0       # 实时路径只打一次，避免重试叠出 5s
+  min_match_score: 0.08    # 低于此视为异常低分，不高亮
+  max_match_dist_m: 0.20   # 最近抓取距质心超过则失败
+  pipeline_budget_s: 5.0   # 提交到高亮的目标时延
+
+wire:
+  min_sam_score: 0.5
+  checkpoint: weights/sam2/sam2.1_hiera_small.pt
+  model_config: configs/sam2.1/sam2.1_hiera_s.yaml
+  crop_margin_px: 24
+  max_mask_fraction: 0.65
+  inset_px: 12            # 沿中心线距端部的像素距离，不是毫米或机器人抓取偏置
+  grasp_policy:
+    offset_mm: 14        # 新离线任务从原始交界总后退14mm；10mm仅保留历史比较
+  auto:
+    method: line_prompts
+    seed_filter:
+      enabled: false       # 默认兼容；区域只约束自动正点，不裁掉分割结果。
+      coordinate_space: original_rgb  # original_rgb | roi；矩形为半开整数xyxy。
+      search_regions: null # null搜索整个ROI；[]不搜索；多个矩形取并集。
+      exclude_regions: []  # 在搜索区域内扣除，仅限制提示点。
+    seed_debug:
+      enabled: true
+      directory: output/wire_seeds  # 相对graspnet_orbbec；每次推理独占子目录。
+    negative_prompts:
+      enabled: true         # 实验开关；仍须填写可信背景区域，否则回退正点。
+      coordinate_space: original_rgb
+      trusted_regions: []   # 仅填写确认没有线材的背景矩形；空列表自动回退正点。
+      max_points: 2
+      min_distance_px: 12
+      max_distance_px: 80
+      wire_clearance_px: 6
+      max_contrast: 6
+      patch_radius_px: 2
+      max_patch_range: 8
+      spacing_px: 12
+    max_seeds: 64
+    seed_spacing_px: 32
+    min_contrast: 12
+    prompt_batch: 8
+    warmup_s: 0.8
+    points_per_side: 32
+    points_per_batch: 32
+    min_score: 0.5
+    stability_score: 0.8
+    max_area_fraction: 0.20
+    max_width_fraction: 0.02 # 放宽旧细线阈值，同时排除较宽桌沿/背景区域
+    min_length_fraction: 0.06
+    min_slenderness: 12
+    max_masks: 32
+    terminal_enabled: true
+    terminal_weights: ../best.pt
+    terminal_class_ids: [0]
+    terminal_label: 线材金属端子
+    terminal_confidence: 0.4
+    terminal_path_max_distance_px: 12
+    terminal_auto_boundary: false
+    terminal_use_seeds: false
+

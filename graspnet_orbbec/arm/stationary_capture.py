@@ -124,7 +124,9 @@ def capture_snapshot(bundle, output):
             if receiver.wait(timeout=12) != 0:
                 raise ValueError('被动反馈检查失败，查看robot.log')
         verified = verify_snapshot(bundle, output)
-        pair = {'status': 'paired_stationary', 'calibration_sha256': bundle.settings['sha256'],
+        pair = {'status': 'paired_stationary', 'data_origin': 'physical_camera',
+                'capture_schema_version': 2, 'capture_kind': 'single_stationary_snapshot',
+                'calibration_sha256': bundle.settings['sha256'],
                 'image_sha256': sha256(output/'capture/rgb.png'),
                 'T_base_flange': flange_transform(verified['robot_pose']).tolist(),
                 'verification': verified, 'robot_motion_commands_sent': 0,

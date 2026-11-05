@@ -17,6 +17,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from arm.moveit_wire_adapter import build_motion_spec, load_recognition, write_json_exclusive
+from arm.handeye_bridge import sha256
+from arm.feedback_safety import MotionAudit, update_joints, require_joints
 
 import rclpy
 from action_msgs.msg import GoalStatus
@@ -50,6 +52,8 @@ DEFAULT_JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
 def parser():
     node = argparse.ArgumentParser(description=__doc__)
     node.add_argument('--recognition', type=Path, required=True)
+    node.add_argument('--binding', type=Path, default=ROOT/'configs/wire_handeye_037K.json',
+                      help='入口独立指定冻结标定，不从recognition选择')
     node.add_argument('--candidate-id')
     node.add_argument('--namespace', default='/piper_x')
     node.add_argument('--group', default='arm')
@@ -153,7 +157,8 @@ class WireMoveGroup(Node):
         self.spec = spec
         self._joint_positions = {}
         self._tcp_pose = None
-        self._joint_seen_at = 0.0
+        self._joint_seen_at = {}
+        self._motion_audit = MotionAudit()
         self._tcp_seen_at = 0.0
         self._diagnostics = {}
         self._diagnostic_seen_at = {}
@@ -198,10 +203,13 @@ class WireMoveGroup(Node):
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
     def _joint_callback(self, message):
-        positions = dict(zip(message.name, message.position))
-        if positions:
-            self._joint_positions.update(positions)
-            self._joint_seen_at = time.monotonic()
+        before = dict(self._joint_positions)
+        update_joints(self._joint_positions, self._joint_seen_at, message.name, message.position, time.monotonic())
+        self._motion_audit.observe(before, self._joint_positions)
+
+    def _require_joint_feedback(self, names=None):
+        require_joints(self._joint_positions, self._joint_seen_at,
+                       self.args.joints if names is None else names, time.monotonic())
 
     def _tcp_callback(self, message):
         self._tcp_pose = message.pose
@@ -260,8 +268,7 @@ class WireMoveGroup(Node):
         if not self._wait_joint_feedback():
             missing = [joint for joint in self.args.joints if joint not in self._joint_positions]
             raise RuntimeError(f'未收到完整真实关节反馈，缺少{missing}')
-        if time.monotonic() - self._joint_seen_at > 2.5:
-            raise ValueError('真实关节反馈陈旧')
+        self._require_joint_feedback()
         if not self._move.wait_for_server(timeout_sec=self.args.feedback_timeout):
             raise RuntimeError(f'MoveGroup Action未就绪：{namespaced(self.args.namespace, "move_action")}')
         self._require_parent_tip_identity()
@@ -394,6 +401,7 @@ class WireMoveGroup(Node):
         return goal
 
     def plan_or_execute(self, name, stage, plan_only, start_positions=None, start_is_diff=True):
+        self._require_joint_feedback()
         started = time.monotonic()
         goal = self._goal(stage, plan_only, start_positions, start_is_diff)
         send_future = self._move.send_goal_async(goal)
@@ -475,6 +483,7 @@ class WireMoveGroup(Node):
             raise RuntimeError(f'控制门控调用失败：{getattr(response, "message", "")}')
 
     def command_gripper(self, width, effort, *, expect_open=False):
+        self._require_joint_feedback(list(self.args.joints)+['gripper'])
         preclose = self._joint_positions.get('gripper')
         self.call_gate(True)
         try:
@@ -512,6 +521,8 @@ class WireMoveGroup(Node):
             deadline = time.monotonic() + 5.0
             while time.monotonic() < deadline:
                 rclpy.spin_once(self, timeout_sec=0.05)
+                if time.monotonic()-self._joint_seen_at.get('gripper', -math.inf) > 1.:
+                    continue
                 actual = self._joint_positions.get('gripper')
                 if actual is None:
                     continue
@@ -519,6 +530,7 @@ class WireMoveGroup(Node):
                     break
                 if not expect_open and actual <= 0.01:
                     break
+            self._require_joint_feedback(['gripper'])
             actual = self._joint_positions.get('gripper')
             if actual is None or (expect_open and actual < width - 0.01):
                 raise RuntimeError(f'夹爪未达到开口目标：requested={width}, actual={actual}')
@@ -543,6 +555,7 @@ def main():
         if args.report is not None and args.report.exists():
             raise ValueError(f'报告路径已存在，拒绝覆盖：{args.report}')
         source, recognition = load_recognition(args.recognition)
+        source_hash = sha256(source)
         spec = build_motion_spec(
             recognition,
             args.candidate_id,
@@ -550,14 +563,25 @@ def main():
             tip_link=args.tip_link,
             expected_parent_frame=args.expected_parent_frame,
             allow_nominal_urdf_tool=args.allow_nominal_urdf_tool,
+            binding_file=args.binding,
         )
+        if args.execute and not spec['execution_allowed']:
+            raise ValueError('真机执行阻断：'+', '.join(spec['execution_blockers']))
     except (OSError, ValueError) as exc:
         print(f'视觉抓取适配失败：{exc}', file=sys.stderr)
         return 2
     rclpy.init()
     node = WireMoveGroup(args, spec)
+    def recheck_source():
+        if sha256(source) != source_hash:
+            raise ValueError('识别文件在会话期间改变')
+        checked = build_motion_spec(recognition, args.candidate_id, frame_id=args.base_frame,
+                                    tip_link=args.tip_link, expected_parent_frame=args.expected_parent_frame,
+                                    allow_nominal_urdf_tool=args.allow_nominal_urdf_tool, binding_file=args.binding)
+        if not checked['execution_allowed']:
+            raise ValueError('执行前来源或视觉门控复验失败：'+', '.join(checked['execution_blockers']))
     report = {
-        'schema_version': 1,
+        'schema_version': 2,
         'status': 'started',
         'execute_requested': bool(args.execute),
         'source_recognition': str(source),
@@ -574,6 +598,8 @@ def main():
             joint: node._joint_positions[joint] for joint in args.joints
         }
         if args.execute:
+            recheck_source()
+            node._motion_audit.attempt('gripper_open')
             report['gripper_results'].append(
                 node.command_gripper(spec['gripper']['open_width_m'],
                                      spec['gripper']['force_n'], expect_open=True)
@@ -581,6 +607,9 @@ def main():
         start_positions = None
         start_is_diff = True
         for name in ('pregrasp', 'grasp'):
+            if args.execute:
+                recheck_source()
+                node._motion_audit.attempt(name)
             stage = next(item for item in spec['stages'] if item['name'] == name)
             result = node.plan_or_execute(
                 name, stage, not args.execute, start_positions, start_is_diff
@@ -592,11 +621,14 @@ def main():
                 start_positions = result['final_joint_positions']
                 start_is_diff = False
         if args.execute:
-            report['physical_motion_performed'] = True
+            recheck_source()
+            node._motion_audit.attempt('gripper_close')
             report['gripper_results'].append(
                 node.command_gripper(spec['gripper']['close_width_m'], spec['gripper']['force_n'])
             )
             lift = next(item for item in spec['stages'] if item['name'] == 'lift')
+            recheck_source()
+            node._motion_audit.attempt('lift')
             report['motion_results'].append(node.plan_or_execute('lift', lift, False))
             report['feedback_checks']['lift_arrival'] = node.wait_actual_pose('lift', lift['pose'])
             report['status'] = 'executed'
@@ -616,6 +648,7 @@ def main():
             f"candidate={spec['candidate_id']} stages={len(report['motion_results'])}"
         )
     finally:
+        report.update(node._motion_audit.report())
         node.destroy_node()
         rclpy.shutdown()
 

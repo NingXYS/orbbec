@@ -1,672 +1,199 @@
-# Piper X 视觉抓取真机启动手册
+# Piper X 真机视觉抓取：日常操作
 
-更新日期：2026-11-04，Asia/Taipei。
+更新：2026-11-05，Asia/Taipei。适用于**采集新场景**，按顺序操作；任一步失败即停止，不跳到执行。
 
-本文是实际操作的运行手册。每个新终端先进入复制后的 `orbbec` 根目录，再执行 `orbbec_root="$(pwd -P)"`；下文的 `$orbbec_root` 由实际位置得到，不依赖用户名。`orbbec` 与 `PIPER X` 应放在同一父目录。不要直接把尖括号占位符输入 Bash；本文命令使用终端变量和真实路径。
+当前工程在 `~/orbbec`。迁移后请按实际位置调整 `cd`，保持 `orbbec` 与 `PIPER X` 同级。新终端的目录和变量相互独立；下面每个代码块只在指定终端运行，不需要 `orbbec_root`。
 
-## 入口位置（2026-11-04归位）
+| 终端 | 工作目录 | 用途 |
+|---|---|---|
+| A | `~/orbbec` | 官方驱动、MoveIt、RViz；启动后保持运行 |
+| B | `~/orbbec/graspnet_orbbec` | 反馈检查、新采图、识别、规划及可选执行 |
 
-- 官方真机启动：`bringup/piper_x/start_real_control.sh`。
-- 采图与识别：`scripts/run_wire_grasp.sh`。
-- 官方MoveIt抓取适配：`scripts/run_moveit_wire_grasp.sh`。
-- 新启动的ROS日志和缓存：`bringup/piper_x/runtime/`。
-- 官方工作空间和`PIPER X`标定工程保持原位。当前正式启动与抓取入口不再从“视觉”加载程序；旧启动路径仅作兼容转发。
+历史照片只用于[冻结结果复核](REAL_GRASP_HISTORY.md)，不是日常执行入口。异常处理见[故障手册](REAL_GRASP_TROUBLESHOOTING.md)，迁移依赖见[迁移说明](PORTABLE_DEPLOYMENT.md)。
 
-[历史官方部署记录](PIPER_X_OFFICIAL_BRINGUP_HISTORY.md)和[历史交接记录](交接文档_官方MoveIt接视觉_20261103.md)仅用于追溯。迁移不代表重新验证真机执行或抓取效果。
+来源门控修复后，旧快照/旧JSON保持可分析，但执行前需用新采集合同重采并重新确认，不要手补来源字段。见[修复与兼容性](AUDIT_FIXES_20261104.md)。
 
-## 1. 先分清两个终端
+## 0. CAN检查：启动驱动之前
 
-终端 A 只负责官方真机进程：
-
-```bash
-bash "$orbbec_root/bringup/piper_x/start_real_control.sh"
-```
-
-终端 A 启动后保持运行。除了最后按 `Ctrl+C`，其余检查、识别、规划和执行都在终端 B 完成。
-
-当前官方入口会启动 RViz。如果不需要 RViz，只关闭 RViz 窗口，不要关闭终端 A，也不要结束 `move_group`、`ros2_control_node` 或 `agx_arm_ctrl_single_node`。
-
-## 2. 使用当前已保存结果的快速路径
-
-如果断电期间桌面、线束、机械臂底座和相机安装都没有移动，可以直接使用已修正的冻结结果：
-
-```text
-recognition: output/wire_grasp/real_20261103_164546_base-12_grasp135_01/recognition.json
-candidate: A
-base Z offset: -12 mm
-grasp center depth: 135 mm
-```
-
-### 2.1 终端 A 启动官方链路
+确认机械臂已上电、USB-CAN和机械臂CAN线接好，工作区清空、实体急停可触达。在任意终端查看：
 
 ```bash
-bash "$orbbec_root/bringup/piper_x/start_real_control.sh"
+ip -details -statistics link show can0
 ```
 
-等待出现：
-
-```text
-You can start planning now!
-```
-
-不要再次执行启动命令。入口有单实例锁，重复启动会失败；若需要完整重启，先在原终端 A 按 `Ctrl+C`，确认全部退出后再启动。
-
-### 2.2 终端 B 配置 ROS 环境
+应包含 `UP`、`bitrate 1000000`，不能为 `STOPPED`、`BUS-OFF` 或仅监听模式。若是 `DOWN / STOPPED`，**确认旧官方launch已在终端A按 Ctrl+C 完整退出**后，手动配置：
 
 ```bash
+sudo ip link set dev can0 type can bitrate 1000000 listen-only off
+sudo ip link set dev can0 up
+```
+
+重新用上面的检查命令确认。接口缺失、配置失败或总线报错时停止。启动脚本只检查接口存在及已启用，不代替位率、总线健康和真机反馈检查；不自动配置CAN。
+
+## 1. 终端A：启动官方链路
+
+```bash
+cd ~/orbbec
+bash bringup/piper_x/start_real_control.sh
+```
+
+等待 `You can start planning now!`。入口启动官方驱动、MoveIt和RViz，默认 `auto_enable=false`、速度5%、官方控制门控及单实例锁。**RViz可见不代表真机已连接。** 不重复启动；RViz窗口退出也不等于后台已退出。
+
+## 2. 终端B：加载环境、检查真实反馈
+
+另开终端B，完整执行一次；若关闭该终端，新开后需重新配置：
+
+```bash
+cd ~/orbbec
 source /opt/ros/humble/setup.bash
-source "$orbbec_root/agilex_official_ws/install_humble/setup.bash"
-
+source agilex_official_ws/install_humble/setup.bash
 export ROS_DOMAIN_ID=93
 export ROS_LOCALHOST_ONLY=1
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+cd graspnet_orbbec
+pwd
 ```
 
-### 2.3 检查控制器和真实反馈
+此后终端B保持在 `graspnet_orbbec`，`scripts/`、`configs/`、`output/` 都相对该目录。检查：
 
 ```bash
 ros2 control list_controllers -c /piper_x/controller_manager
-```
-
-预期三个控制器都是 `active`：
-
-```text
-joint_state_broadcaster
-arm_controller
-gripper_controller
-```
-
-检查真实反馈：
-
-```bash
 ros2 topic echo /piper_x/feedback/joint_states --once
 ros2 topic echo /piper_x/feedback/tcp_pose --once
 ```
 
-任何一条没有数据，都不要继续执行。
+三个控制器 `joint_state_broadcaster`、`arm_controller`、`gripper_controller` 应为 `active`；两条真实反馈均须收到数据，关节完整、姿态合理。任何一条无数据、反馈异常或陈旧，停止，不反复使能。
 
-### 2.4 先做只规划
+## 3. 终端B：采集本次新快照
 
-```bash
-cd "$orbbec_root/graspnet_orbbec"
-
-recognition="output/wire_grasp/real_20261103_164546_base-12_grasp135_01/recognition.json"
-candidate_id="A"
-
-scripts/run_moveit_wire_grasp.sh \
-  --recognition "$recognition" \
-  --candidate-id "$candidate_id"
-```
-
-成功标志：
-
-```text
-规划完成：candidate=A stages=2
-status: planned_only
-physical_motion_performed: false
-```
-
-报告路径会打印为类似：
-
-```text
-output/wire_grasp/moveit_<时间戳>_A/report.json
-```
-
-报告中还必须看到：
-
-```text
-execution_allowed: true
-execution_blockers: []
-```
-
-否则不要加 `--execute`。
-
-真机执行报告会分别记录规划容差和实际到位验收容差。当前默认：
-
-```text
-规划位置容差：3 mm
-规划姿态容差：0.05 rad
-执行后位置验收：10 mm
-执行后姿态验收：0.10 rad
-```
-
-执行后的验收容差用于判断控制器是否完成抓取动作，不改变视觉/手眼绝对精度，也不能据此声称毫米级精度。
-
-### 2.5 手动使能并检查状态
-
-确认工作区无人、急停可触达后再使能：
+保持机械臂、相机、桌面和线材静止，采集约4秒的RGB/深度及被动法兰反馈；此步骤不发送运动：
 
 ```bash
-ros2 service call /piper_x/enable_agx_arm \
-  std_srvs/srv/SetBool "{data: true}"
-```
-
-成功返回：
-
-```text
-success=True
-message='Agx_arm enabled'
-```
-
-检查电机：
-
-```bash
-ros2 topic echo /piper_x/feedback/motor_status --once
-```
-
-六个关节必须同时满足：
-
-```text
-message: enabled
-enabled: 'true'
-```
-
-检查夹爪：
-
-```bash
-ros2 topic echo /piper_x/feedback/gripper_status --once
-```
-
-必须满足：
-
-```text
-driver_enable_status: 'true'
-```
-
-所有故障标志都应为 `false`。
-
-### 2.5.1 机械臂已使能但夹爪仍为disabled
-
-当前官方ROS封装没有单独的夹爪enable服务。机械臂使能不会保证夹爪驱动已经使能；首次发送合法的官方夹爪宽度命令通常会唤醒夹爪。
-
-先短时打开官方控制门控：
-
-```bash
-ros2 service call /piper_x/control_enable \
-  std_srvs/srv/SetBool "{data: true}"
-```
-
-发送一次50 mm开口、1 N限力命令：
-
-```bash
-ros2 topic pub --once /piper_x/control/joint_states \
-  sensor_msgs/msg/JointState \
-  "{name: [gripper], position: [0.05], velocity: [], effort: [1.0]}"
-```
-
-等待一秒后检查：
-
-```bash
-ros2 topic echo /piper_x/feedback/gripper_status --once
-```
-
-预期：
-
-```text
-message: enabled
-driver_enable_status: 'true'
-```
-
-确认后关闭门控：
-
-```bash
-ros2 service call /piper_x/control_enable \
-  std_srvs/srv/SetBool "{data: false}"
-```
-
-该动作会让夹爪实际运动，执行前必须确认夹爪周围安全。若发送后仍为`disabled`，检查`agx_arm_ctrl_single`终端是否出现夹爪控制错误，不要重复高频发送。
-
-### 2.6 执行真机抓取
-
-```bash
-scripts/run_moveit_wire_grasp.sh \
-  --recognition "$recognition" \
-  --candidate-id "$candidate_id" \
-  --execute
-```
-
-执行顺序：
-
-1. 官方夹爪打开到 100 mm；
-2. MoveIt 到预抓取位；
-3. MoveIt 下降到夹持位；
-4. 官方 `gripper_controller/follow_joint_trajectory` 闭合夹爪，使用驱动默认 `1.0 N`；
-5. MoveIt 抬升回预抓取位。
-
-## 3. 场景变化后的完整采图识别流程
-
-如果机械臂、底座、相机、桌面或线束发生过移动，不能复用冻结坐标。
-
-### 3.0 固定桌面平面模式
-
-当前已保存：
-
-```text
-configs/support_plane_piper_x_02.json
-```
-
-来源快照：
-
-```text
-output/wire_grasp/support_plane_20261103_live_01
-```
-
-固定平面参数：
-
-```text
-frame_id: base_link
-base_z_offset_m: -0.012
-normal_base: [0.01809, 0.02626, 0.99949]
-offset_base_m: -0.01215 m
-棋盘重投影RMS: 0.2168 px
-```
-
-使用该模式时，新照片不需要棋盘入镜，但机械臂底座、桌面和相机安装必须没有移动。线束移动不影响固定桌面平面。
-
-重新保存固定平面时，只需要完整棋盘，不需要线束入镜：
-
-```bash
-bash scripts/run_wire_grasp.sh save-fixed-plane \
-  --snapshot "$snapshot_dir" \
-  --base-z-offset-mm -12 \
-  --out configs/support_plane_piper_x_03.json
-```
-
-保存时要求：
-
-- 棋盘四边完整可见；
-- 黑白方格清晰、无高光；
-- 机械臂和相机在采集期间静止；
-- 机械臂底座、桌面和相机安装保持固定。
-
-固定桌面平面的使用命令：
-
-```bash
-bash scripts/run_wire_grasp.sh preview \
-  --snapshot "$snapshot_dir" \
-  --center-height-mm "$wire_center_height_mm" \
-  --support-relation-confirmed \
-  --same-installation-confirmed \
-  --base-z-offset-mm -12 \
-  --fixed-plane configs/support_plane_piper_x_02.json \
-  --tool configs/wire_tool_piper_x_135mm.json
-```
-
-使用固定平面后，普通新采图不再需要棋盘。
-
-### 3.1 采图
-
-在终端 B：
-
-```bash
-cd "$orbbec_root/graspnet_orbbec"
-
-snapshot_dir="output/wire_grasp/real_$(date +%Y%m%d_%H%M%S)"
+snapshot_dir="output/wire_grasp/real_$(date +%Y%m%d_%H%M%S_%N)"
 bash scripts/run_wire_grasp.sh capture --out "$snapshot_dir"
-printf '\n本次快照目录：%s\n' "$snapshot_dir"
 ```
 
-约四秒内保持机械臂、相机、桌面和线材静止。该步骤只读，不发送运动。
+看到“配对快照已保存”，并确认目录内有 `pair.json` 和 `capture/COMPLETE` 才继续。失败时保留原目录，不覆盖或伪造配对文件。
 
-### 3.2 打开预览并确认交界
+需要保存同一静止场景的5–10张独立原始RGB时，参见[可选多帧采集与manifest](STATIONARY_RGB_SEQUENCE.md)。默认单帧不变；多帧仅采集和验收，不融合识别结果或自动运动。
 
-先输入实测的线材中心高度：
+## 4. 终端B：核实定位条件，SAM2识别并人工确认交界
+
+当前默认启用这次固定摆位的ROI：原始640×480图中的 `[40,160,555,218]`，保留右端端子和线身，避开桌孔、夹爪及左固定块。无需另加参数；已打开的GUI需按Q退出后重开，R不会重新加载配置。相机视角、摆位或分辨率变化后须重选范围，见[固定视角ROI说明](FIXED_VIEW_ROI_037K.md)。
+
+以下固定平面模式仅适用于：底座、桌面和相机安装与保存平面时一致；手眼绑定有效；夹指及夹持中心与工具配置一致。安装关系改变后停止复用，按[重新建立平面](REAL_GRASP_TROUBLESHOOTING.md#重新建立固定平面)处理；相机相对法兰改变还需重新核验手眼标定。
+
+线束移动后可继续使用有效的固定桌面平面，但**必须重新核实线材中心相对棋盘印刷面的高度及局部平行关系**，不能沿用历史44mm。以下确认参数表示操作者已核实这些条件，不能仅为消除报错添加。
 
 ```bash
-read -r -p "线材中心相对棋盘表面的高度(mm): " wire_center_height_mm
-```
-
-输入数字本身，例如：
-
-```text
-44
-```
-
-不要输入 `44mm`、`<44>` 或 `new_snapshot`。
-
-启动预览：
-
-```bash
-bash scripts/run_wire_grasp.sh preview \
-  --snapshot "$snapshot_dir" \
-  --center-height-mm "$wire_center_height_mm" \
-  --support-relation-confirmed \
-  --same-installation-confirmed \
-  --base-z-offset-mm -12 \
-  --tool configs/wire_tool_piper_x_135mm.json
-  --roi 30 120 520 280
-```
-
-默认不传 `--roi`，自动识别整张原图。线束位置经常变化时，应优先使用这种方式，不要复制上一张图专用的窄ROI。
-
-如果整图误检过多，可增加覆盖整个工作区域的大ROI：
-
-```bash
-  --roi 0 0 640 350
-```
-
-不要把单个端子的窄ROI写进通用启动命令；它只适合在一张固定图片上排查特定端子。
-
-窗口操作：
-
-1. 按 `R`：重新自动识别；
-2. `Shift + 左键`：点击端子侧金属/绝缘交界；
-3. 确认出现粉色交界和绿色夹持中心；
-4. 按一次 `S`；
-5. 终端出现 `已保存：...`；
-6. 再按 `Q` 退出。
-
-`S` 只保存，不会退出；`Q` 才会关闭窗口。不要在没有看到“已保存”时退出。
-
-GUI 的保存目录通常是：
-
-```text
-output/wire/<时间戳>/recognition.json
-```
-
-不是 `output/wire_grasp`。
-
-### 3.3 找到最后一次保存结果
-
-```bash
-latest_recognition="$(ls -t output/wire/*/recognition.json | head -1)"
-printf '最新识别：%s\n' "$latest_recognition"
-```
-
-列出已确认且可规划的候选：
-
-```bash
-python3 - "$latest_recognition" <<'PY'
+fixed_plane="configs/support_plane_piper_x_02.json"
+tool_file="configs/wire_tool_piper_x_135mm.json"
+base_z_offset_mm="$(python3 - "$fixed_plane" <<'PY'
 import json, sys
-data = json.load(open(sys.argv[1]))
-ready = [
-    item["candidate_id"]
-    for item in data["grasp_plans"]
-    if item.get("status") == "base_frame_preview_ready"
-]
-print("可规划候选：", ready)
-print("阻断：", data.get("grasp_policy", {}).get("readiness_blockers"))
+print(float(json.load(open(sys.argv[1]))['base_z_offset_m']) * 1000)
 PY
+)"
+read -r -p "本次实测线材中心相对棋盘印刷面的高度(mm，只填数字): " wire_center_height_mm
+
+bash scripts/run_wire_grasp.sh preview \
+  --snapshot "$snapshot_dir" \
+  --center-height-mm "$wire_center_height_mm" \
+  --support-relation-confirmed \
+  --same-installation-confirmed \
+  --base-z-offset-mm "$base_z_offset_mm" \
+  --fixed-plane "$fixed_plane" \
+  --tool "$tool_file"
 ```
 
-例如输出：
+先确认黄色中心线沿真实线身，没有把桌沿、夹爪或支架混入；必要时按 `R` 重跑同一张照片。用 **Shift+左键** 点击目标金属/绝缘交界，检查粉色交界、绿色夹持中心及基座坐标预览。默认沿线身后退14mm。端子模型仅为辅助证据，不代替人工确认；提示“待真实三维尺度”或路径歧义时不继续。
 
-```text
-可规划候选： ['A']
-阻断： []
-```
+端子模型漏检时，只要线材实例与局部路径有效，仍可人工确认交界并继续定位、只规划。模型检出端子后也须完成相同检查；线材实例歧义、尺度缺失或来源校验失败时停止。
 
-把看到的候选写入变量：
+若Shift提示“实例归属存在歧义”，先在左侧**目标线身中段普通左键点一下**，等待重新分割；右键可补背景负点。检查新掩码只包含目标线身、没有粘连/交叉/断裂，按 **V复核线身**，再 **Shift+左键确认交界**。新补点会使复核失效，须重新按V；自动分割已清晰时不要求V。详见[手动纠正流程](MANUAL_WIRE_CORRECTION.md)。
+
+## 5. 终端B：保存并选择本次候选
+
+窗口中按 `S`，看到终端“已保存：...”后再按 `Q`。`S`只保存，`Q`才退出。GUI结果通常在 `output/wire/`；采图快照在 `output/wire_grasp/`。
+
+输入**刚才S保存的目录**，不按“全局最新文件”自动挑选，以免误取历史结果：
 
 ```bash
-candidate_id="A"
-recognition="$latest_recognition"
+read -r -p "粘贴本次“已保存”的目录（不要加引号）: " recognition_dir
+recognition="${recognition_dir%/}/recognition.json"
+python3 - "$recognition" "$snapshot_dir" <<'PY'
+import json, sys
+from pathlib import Path
+p = Path(sys.argv[1])
+d = json.loads(p.read_text())
+policy = d.get('grasp_policy', {})
+if Path(policy.get('capture_snapshot') or '').resolve() != Path(sys.argv[2]).resolve():
+    raise SystemExit('停止：识别结果不属于本次快照')
+ready = [x['candidate_id'] for x in d.get('grasp_plans', [])
+         if x.get('status') == 'base_frame_preview_ready' and x.get('boundary_confirmed')]
+print('可规划候选：', ready)
+print('定位阻断：', policy.get('readiness_blockers'))
+print('候选视觉阻断：', {x['candidate_id']: x.get('readiness_blockers', [])
+                       for x in d.get('grasp_plans', []) if x['candidate_id'] in ready})
+if not ready:
+    raise SystemExit('停止：没有可规划目标')
+PY
+read -r -p "从上面列表选择本次目标ID: " candidate_id
 ```
 
-### 3.4 新场景先规划、再执行
+检查命令报错或候选列表为空时，不输入ID、不继续。设置变量不会解除阻断。`base_frame_preview_ready`只表示可送规划，不是执行许可。
 
-只规划：
+## 6. 终端B：只规划，检查报告与现场路径
 
 ```bash
-scripts/run_moveit_wire_grasp.sh \
+plan_report="output/wire_grasp/plan_$(date +%Y%m%d_%H%M%S_%N)/report.json"
+bash scripts/run_moveit_wire_grasp.sh \
   --recognition "$recognition" \
-  --candidate-id "$candidate_id"
+  --candidate-id "$candidate_id" \
+  --report "$plan_report"
 ```
 
-确认报告：
+这一步不加 `--execute`。程序打印报告路径；检查报告顶层 `status=planned_only`、`physical_motion_performed=false`，以及 **`motion_spec` 内**的 `execution_allowed`、`execution_blockers` 和 `warnings`。只有 `execution_allowed=true`、`execution_blockers=[]`，且警告已人工评估，才考虑真机执行；否则停在规划预览。
 
-```text
-status = planned_only
-execution_allowed = true
-physical_motion_performed = false
-```
+新结果还需 `motion_spec.visual_path_review.passed=true` 和 `motion_spec.source_review.passed=true`，分别表示局部路径及实际快照来源复验通过。`execution_source_missing` / `execution_source_invalid` 时按[修复说明](AUDIT_FIXES_20261104.md)重采并重新确认，不手补字段或删除阻断。旧JSON不能因坐标可用或 `path_ambiguous=false`获准执行；[复核步骤](VISUAL_PATH_COMPATIBILITY.md)说明如何重新生成证据。
 
-然后按本文第 2.5 节手动使能、检查状态，再执行：
+只规划目前检查预抓取、抓取两段；抬升在执行阶段规划。人工查看目标、接近方向和运动空间，确认桌面、支架、相机及线材不会碰撞。适配器不自动把这些物体加入MoveIt场景，不能仅凭规划成功断言现场安全或视觉绝对精度达标。
+
+## 7. 终端B：人工确认后，可选执行
+
+只观察效果可跳到第8步。需要执行时，先确认本次照片、候选和规划有效；其后目标、线材、底座或安装关系未变，机械臂当前状态可信，工作区清空、实体急停可触达。场景改变须回到新采图，不重放旧目标。
+
+人工使能（可能改变机器人保持状态）：
 
 ```bash
-scripts/run_moveit_wire_grasp.sh \
+ros2 service call /piper_x/enable_agx_arm std_srvs/srv/SetBool "{data: true}"
+ros2 topic echo /piper_x/feedback/arm_status --once
+ros2 topic echo /piper_x/feedback/motor_status --once
+ros2 topic echo /piper_x/feedback/gripper_status --once
+```
+
+使能服务须返回 `success=True`；六轴均 `enabled=true`，夹爪 `driver_enable_status=true`，诊断均为OK且无故障、无示教记录状态。反馈缺失/陈旧、夹爪未使能或任何阻断均不得继续；夹爪单独唤醒见[故障手册](REAL_GRASP_TROUBLESHOOTING.md#机械臂已使能但夹爪未使能)，该操作会真实运动。
+
+人工确认上述条件后才运行：
+
+```bash
+bash scripts/run_moveit_wire_grasp.sh \
   --recognition "$recognition" \
   --candidate-id "$candidate_id" \
   --execute
 ```
 
-## 4. 常见错误与处理
+真实动作顺序为：打开夹爪 → 预抓取 → 到夹持位 → 闭合 → 抬升。程序重新请求规划并检查真实反馈，不直接回放上一步报告；不会自动使能机械臂。失败后不盲目重试、不放宽容差或绕过阻断。控制器成功和`executed`报告仍需结合现场观察确认是否实际夹住、抬起线材。
 
-### `bash: new_snapshot: No such file or directory`
+失败报告中的 `physical_motion_performed=null` 表示已尝试动作但运动证据不足，不能当作“未动”。查看 `motion_commands_attempted`、`motion_evidence`及现场反馈，先确认真实状态再处理。
 
-把 `<new_snapshot>` 原样粘贴了。尖括号是 Bash 重定向，不是路径。使用本文的 `snapshot_dir` 变量。
+## 8. 安全退出
 
-### `bash: 未预期的记号 "newline" 附近有语法错误`
+关闭预览用 `Q`；正常结束在**终端A对整个官方launch按 Ctrl+C**，等待驱动、MoveIt及控制器退出。只关闭RViz不会结束后台。
 
-同上，命令中包含 `<...>` 占位符。不要输入尖括号。
-
-### `反馈未稳定`
-
-失败目录没有`pair.json`，不能继续做手眼预览。
-
-当前线束采图会先使用原有的全程稳定门槛。如果抖动只出现在图像采集完成之后，则回退检查`RGB接收时刻±0.5秒`内的真实曝光窗口：
-
-- 反馈仍必须完整覆盖RGB和depth；
-- 图像接收时刻前后必须有20ms内的反馈覆盖；
-- 整个监听窗口不能存在超过20ms的反馈缺口；
-- RGB接收窗口内位置变化必须≤0.5mm、姿态≤0.1°；
-- 全程抖动幅度记录到`pair.json`供审计，但不会混入曝光时刻位姿。
-
-2026-11-04实测中，RGB接收前后400帧完全一致，抖动只发生在图像采集完成后的约3.55秒。修改后重新采图成功，新快照为：
-
-```text
-output/wire_grasp/real_20261104_103204_retry01
-```
-
-如果RGB接收窗口本身也在抖动，仍然拒绝采图，需要检查伺服保持增益、负载、关节温度和碰撞/过流状态。
-
-### `交界点离端部中心线太远`
-
-在端子侧金属/绝缘交界处重新 `Shift + 左键`。当前版本允许交界点位于主中心线中部，不必恰好落在自动生成的端点上。成功后会生成类似`M10`的人工主路径候选。
-
-如果界面仍拒绝，按`Q`退出，使用当前`640×480`工作区ROI直接指定交界：
-
-```bash
-bash scripts/run_wire_grasp.sh recognize \
-  --snapshot output/wire_grasp/real_20261103_213751 \
-  --center-height-mm 44 \
-  --support-relation-confirmed \
-  --same-installation-confirmed \
-  --base-z-offset-mm -12 \
-  --fixed-plane configs/support_plane_piper_x_02.json \
-  --tool configs/wire_tool_piper_x_135mm.json \
-  --roi 30 120 520 280 \
-  --boundary-point 410 150 \
-  --out output/wire_grasp/real_20261103_213751_manual_02
-```
-
-已验证`[410,150]`会吸附到主中心线`[411,142]`，生成`base_frame_preview_ready`候选。点击只需靠近真实端子交界；不要求先自动生成正确端点。
-
-### `端子模型未检出端子；当前只有线材几何端部候选`
-
-这不是完全识别失败，而是需要人工确认交界。使用同一张冻结快照，不必立刻重拍。
-
-1. 查看终端列出的端点像素，例如：
-
-   ```text
-   端点A: [468, 84] 像素
-   端点B: [454, 125] 像素
-   ```
-
-2. 在正确端点对应的金属/绝缘交界处执行 `Shift + 左键`。
-3. 点击必须靠近黄色中心线；点到红色块、背景或离中心线超过约12像素时会报“交界点离端部中心线太远”。
-4. 确认粉色交界与绿色夹持中心后，按 `S` 保存，再按 `Q`。
-
-如果误检测到顶部圆孔等无关区域，但正确端点仍可选，可以忽略无关候选。只有正确端子无法选中时才重新采图。
-
-### YOLO已经检出端子时（高级实验，默认关闭）
-
-当前默认流程是“SAM2中心线 + 人工确认交界”。YOLO端子模型仍可作为辅助证据显示，但默认不会自动生成交界，也不会把YOLO端子点加入SAM2提示。本节仅用于以后显式开启实验模式时参考，不应复制到当前默认流程。
-
-如需重新启用YOLO自动关联，可显式设置：
-
-```yaml
-wire.auto:
-  terminal_auto_boundary: true
-  terminal_use_seeds: true
-```
-
-启用YOLO自动关联时，成功终端和报告中会出现类似：
-
-```text
-端子模型T1: confidence=0.451
-YOLO自动交界 Y1
-terminal_boundary_suggestions: {'Y1': [460.0, 167.0]}
-```
-
-默认回退模式下仍可单独运行`run_yolo.sh`观察端子检测效果；正式识别坐标仍使用SAM2中心线和`Shift + 左键`确认交界。
-
-`Y1` 是YOLO引导的自动交界候选，不依赖A/B等几何端部是否刚好落在端子上。其流程为：
-
-1. YOLO定位金属端子；
-2. 找端子掩码附近最近的SAM2主中心线点；
-3. 从该点沿较长一侧线身生成抓取中心；
-4. 后续仍要求当前棋盘平面和44 mm线材中心高度有效，才能得到毫米级抓取坐标。
-
-如果只出现`T1`而没有`Y1`，说明端子与主中心线距离超过默认12像素。优先重新调整端子可见性，或使用`Shift + 左键`人工确认；也可配置：
-
-```text
-wire.auto.terminal_path_max_distance_px
-```
-
-不要仅为了“更灵敏”把这个距离无限增大，否则可能把邻近金属块或背景误关联到线束。
-
-### 固定平面与YOLO联合验证结果（历史实验记录）
-
-以下仅记录关闭自动关联前完成过的离线实验，不代表当前默认流程会自动点击或自动确认交界。
-
-已用移动后的线束快照
-
-```text
-output/wire_grasp/real_20261103_204658
-```
-
-完成离线验证：
-
-```text
-YOLO T1 confidence: 0.451
-YOLO框: [460,169]-[475,175]
-自动交界 Y1: [460,167]
-支撑平面来源: fixed_base_plane
-抓取候选: base_frame_preview_ready
-```
-
-对应的完整识别结果：
-
-```text
-output/wire_grasp/real_20261103_204658_fixed-plane-yolo-b02-01/recognition.json
-```
-
-隔离MoveIt mock已对候选`Y1`完成只规划，`pregrasp`和`grasp`均成功，`execution_allowed=true`，且未发送真机动作。
-
-### 刷新后仍无法识别正确端子
-
-`R` 只是在同一张冻结原图上重新运行识别，不能恢复拍摄时已经丢失的信息。按下面顺序处理：
-
-1. 按 `Q` 退出；
-2. 保持同一快照，缩小右侧端子ROI后重开：
-
-   ```bash
-   bash scripts/run_wire_grasp.sh preview \
-     --snapshot output/wire_grasp/real_20261103_200055 \
-     --center-height-mm 44 \
-     --support-relation-confirmed \
-     --same-installation-confirmed \
-     --base-z-offset-mm -12 \
-     --tool configs/wire_tool_piper_x_135mm.json \
-     --roi 0 0 640 350
-   ```
-
-3. 再按 `R`，并在列出的端点像素附近人工确认交界；
-4. 同一快照经过一次ROI调整和一次人工点击仍失败，才重新采图。
-
-`ROI` 是原始640×480图像上的矩形，格式为：
-
-```text
-x1 y1 x2 y2
-```
-
-- `(0,0)` 是左上角；
-- `x` 向右增大，`y` 向下增大；
-- `0 0 640 350` 表示覆盖整幅图像的上部工作区，排除下方夹爪和桌外区域；
-- 它只是限制识别范围，不会放大图像，输出坐标仍是原图640×480坐标；
-- ROI切到端子边缘会导致端子被当成裁剪断端，因此端子周围要留至少10–20像素；
-- 线束位置变化时，先删除`--roi`；只有在单张图上误检过多时，才按当前画面重新设置窄ROI。
-
-如果GUI中`Shift + 左键`总是在红块上选错，可直接在CLI指定正确交界并重新识别：
-
-```bash
-bash scripts/run_wire_grasp.sh recognize \
-  --snapshot output/wire_grasp/real_20261103_200055 \
-  --center-height-mm 44 \
-  --support-relation-confirmed \
-  --same-installation-confirmed \
-  --base-z-offset-mm -12 \
-  --tool configs/wire_tool_piper_x_135mm.json \
-  --roi 260 20 640 230 \
-  --boundary-point 416 88 \
-  --out output/wire_grasp/real_20261103_200055_manual_j2
-```
-
-该命令已在本快照验证，生成候选`J2`并得到`base_frame_preview_ready`。如果输出目录已存在，需要换一个新的输出目录名，不能覆盖旧结果。
-
-重新采图前检查：
-
-- 棋盘四边完整，不遮住棋盘印刷面；
-- 线束和正确金属端子完整进入画面；
-- 端子不要贴着画面边缘，四周留出至少30像素；
-- 端子尽量位于画面中部并占足够像素；
-- 夹爪、手腕和线束阴影不能遮挡端子；
-- 避免金属端子高光发白或完全融入背景；
-- 只保留一组主要线束，避免多根线粘连；
-- 采集时机械臂、相机、桌面和线材保持静止；
-- 重新采图后必须按新的快照重新测量高度和确认交界。
-
-重新采图：
-
-```bash
-snapshot_dir="output/wire_grasp/real_$(date +%Y%m%d_%H%M%S)"
-bash scripts/run_wire_grasp.sh capture --out "$snapshot_dir"
-printf '新快照：%s\n' "$snapshot_dir"
-```
-
-随后使用本文第3.2节的预览命令，并把 `--snapshot` 设置为新生成的 `"$snapshot_dir"`。
-
-### 保存后不知道用哪个文件
-
-按 `S` 后终端会打印真实路径。也可以运行：
-
-```bash
-latest_recognition="$(ls -t output/wire/*/recognition.json | head -1)"
-printf '%s\n' "$latest_recognition"
-```
-
-### 报告显示 `execution_allowed=false`
-
-先看 `execution_blockers` 和 `readiness_blockers`，不要添加执行开关强行运行。
-
-### 夹爪 JTC 报 `Trajectories with effort fields are currently not supported`
-
-当前实现已修复：只发送位置轨迹，夹持力使用驱动的 `gripper_default_effort=1.0 N`。
-
-### 重新上电后是否必须接入机械臂
-
-- 只改代码、识别和离线规划：不需要机械臂。
-- 真机执行、夹爪闭合、TCP到位和搬运验证：必须接入机械臂。
-
-## 5. 安全停止和断电
-
-正常退出时，在终端 A 对整个官方 launch 按一次 `Ctrl+C`，等待控制器全部退出。
-
-需要软件急停时：
+异常时实体急停优先；软件急停仅在驱动及服务仍可响应时使用，在已配置环境的终端B运行：
 
 ```bash
 ros2 service call /piper_x/emergency_stop std_srvs/srv/Empty "{}"
 ```
 
-实体急停优先。断电前确认机械臂制动保持、下方无人和无线材，再关闭机械臂电源；不要在驱动仍运行时拔 CAN/USB。
+退出进程不等于失能或物理急停。确认机械臂稳定支撑、制动保持、人员及线材安全后，按设备断电流程关闭电源；不要在驱动仍运行时拔CAN/USB。

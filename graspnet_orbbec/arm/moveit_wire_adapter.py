@@ -8,6 +8,8 @@ from pathlib import Path
 
 import numpy as np
 
+from segmentation.path_validation import execution_path_review
+
 
 TARGET_STATUS = 'base_frame_preview_ready'
 NOMINAL_TOOL_BLOCKER = 'nominal_finger_tip_reference_not_verified_grasp_center'
@@ -128,7 +130,7 @@ def select_grasp_plan(recognition, candidate_id=None):
 
 def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
                       tip_link='tcp_link', expected_parent_frame='link6',
-                      allow_nominal_urdf_tool=False):
+                      allow_nominal_urdf_tool=False, binding_file=None):
     """输出预抓取、夹持和抬升三个MoveIt位姿，并保留执行阻断原因。"""
     plan = select_grasp_plan(recognition, candidate_id)
     if plan.get('status') != TARGET_STATUS:
@@ -173,7 +175,9 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
     blockers.extend(policy.get('readiness_blockers') or [])
     blockers = list(dict.fromkeys(str(item) for item in blockers))
     # 名义工具默认只规划；用户显式授权后才可按URDF模型参数做真机闭合。
-    hard_plan_blockers = [item for item in blockers if item != NOMINAL_TOOL_BLOCKER]
+    # 新视觉证据缺失不阻止历史数据只规划分析，但必须阻断真实执行。
+    hard_plan_blockers = [item for item in blockers if item != NOMINAL_TOOL_BLOCKER
+                          and not item.startswith('visual_path_')]
     if hard_plan_blockers:
         raise ValueError('视觉目标仍有规划阻断：' + ', '.join(hard_plan_blockers))
     nominal_tool_authorized = NOMINAL_TOOL_BLOCKER in blockers and allow_nominal_urdf_tool
@@ -181,10 +185,20 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
         item for item in blockers
         if item != NOMINAL_TOOL_BLOCKER or not nominal_tool_authorized
     ]
+    visual_review = execution_path_review(recognition, plan)
+    from arm.source_validation import execution_source_review
+    source_review = execution_source_review(recognition, plan, binding_file,
+                                            allow_nominal_urdf_tool=allow_nominal_urdf_tool)
+    execution_blockers = list(dict.fromkeys(execution_blockers+visual_review['rejection_reasons']
+                                           +source_review['rejection_reasons']))
+    if source_review.get('nominal_tool'):
+        nominal_tool_authorized = allow_nominal_urdf_tool
+        if not allow_nominal_urdf_tool and NOMINAL_TOOL_BLOCKER not in execution_blockers:
+            execution_blockers.append(NOMINAL_TOOL_BLOCKER)
 
     handeye = policy.get('handeye') or {}
     warnings = []
-    if NOMINAL_TOOL_BLOCKER in blockers:
+    if NOMINAL_TOOL_BLOCKER in blockers or source_review.get('nominal_tool'):
         warnings.append(NOMINAL_TOOL_BLOCKER)
     if nominal_tool_authorized:
         warnings.append('nominal_urdf_tool_execution_authorized_by_user')
@@ -230,6 +244,8 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
         'planning_allowed': True,
         'execution_allowed': not execution_blockers,
         'execution_blockers': execution_blockers,
+        'visual_path_review': visual_review,
+        'source_review': source_review,
         'warnings': warnings,
         'nominal_urdf_tool_execution_authorized': nominal_tool_authorized,
         'readiness_note': (
