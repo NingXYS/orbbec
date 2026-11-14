@@ -8,6 +8,10 @@
 
 ## 环境与编译
 
+Git 仓库保留工程源码、启动脚本、标定配置、文档及测试样例；本机环境、模型权重、运行日志、`output/`、根目录 `outputs/` 中的 CAD 产物和 `agilex_official_ws/` 不随源码提交。忽略规则不会删除这些本地文件。
+
+PyOrbbecSDK v2 的 `third_party/pyorbbecsdk2/` 是 pip 安装目录，不随源码提交。需要 v2 相机后端时，在建立视觉 Conda 环境后，从 `graspnet_orbbec/` 执行 `bash scripts/install_pyorbbecsdk2.sh` 重建；模型下载见 `scripts/download_weights.sh`，官方 ROS 工作空间需单独准备。
+
 视觉环境为 `graspnet_orbbec/.conda`。标定机器人和相机入口优先使用 `PIPER X/hand-eye-calibration/.conda-robot`、`.conda-camera`；未建立工程内环境时，兼容当前用户的 `$HOME/miniconda3/envs/handeye-robot`、`handeye-camera`。其他位置用 `HANDEYE_ROBOT_CONDA_PREFIX`、`HANDEYE_CONDA_PREFIX` 指定。变量中的相对路径以 `hand-eye-calibration` 根目录解析。
 
 例如，若环境位于 `PIPER X/robot-env`：

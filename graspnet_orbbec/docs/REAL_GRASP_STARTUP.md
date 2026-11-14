@@ -13,9 +13,12 @@
 
 来源门控修复后，旧快照/旧JSON保持可分析，但执行前需用新采集合同重采并重新确认，不要手补来源字段。见[修复与兼容性](AUDIT_FIXES_20261104.md)。
 
+需要自己重新示教固定装配点时，按[重新记录装配位置](ASSEMBLY_FIXED_TARGET.md#自己重新记录装配位置)操作：摆到最终目标后运行 `bash scripts/record_assembly_target.sh`，再退出示教并重新只规划。
+
 ## 0. CAN检查：启动驱动之前
 
 确认机械臂已上电、USB-CAN和机械臂CAN线接好，工作区清空、实体急停可触达。在任意终端查看：
+sudo ip link set can0 up type can bitrate 1000000
 
 ```bash
 ip -details -statistics link show can0
@@ -149,6 +152,7 @@ plan_report="output/wire_grasp/plan_$(date +%Y%m%d_%H%M%S_%N)/report.json"
 bash scripts/run_moveit_wire_grasp.sh \
   --recognition "$recognition" \
   --candidate-id "$candidate_id" \
+  --assembly-target configs/wire_assembly_fixed_20261106.json \
   --report "$plan_report"
 ```
 
@@ -156,7 +160,7 @@ bash scripts/run_moveit_wire_grasp.sh \
 
 新结果还需 `motion_spec.visual_path_review.passed=true` 和 `motion_spec.source_review.passed=true`，分别表示局部路径及实际快照来源复验通过。`execution_source_missing` / `execution_source_invalid` 时按[修复说明](AUDIT_FIXES_20261104.md)重采并重新确认，不手补字段或删除阻断。旧JSON不能因坐标可用或 `path_ambiguous=false`获准执行；[复核步骤](VISUAL_PATH_COMPATIBILITY.md)说明如何重新生成证据。
 
-只规划目前检查预抓取、抓取两段；抬升在执行阶段规划。人工查看目标、接近方向和运动空间，确认桌面、支架、相机及线材不会碰撞。适配器不自动把这些物体加入MoveIt场景，不能仅凭规划成功断言现场安全或视觉绝对精度达标。
+本手册已指定固定装配目标，因此只规划检查预抓取、抓取、抬升、装配直线入口、装配末段五段。末段沿 base_link -Y 直线进入30 mm并保持装配姿态，速度上限10 mm/s。若不需要装配转移，删除只规划和执行命令中的 `--assembly-target`；此时只规划仍只检查预抓取、抓取两段。人工查看目标、接近方向和运动空间，确认桌面、支架、相机及线材不会碰撞。适配器不自动把这些物体加入MoveIt场景，不能仅凭规划成功断言现场安全或视觉绝对精度达标。
 
 ## 7. 终端B：人工确认后，可选执行
 
@@ -179,10 +183,13 @@ ros2 topic echo /piper_x/feedback/gripper_status --once
 bash scripts/run_moveit_wire_grasp.sh \
   --recognition "$recognition" \
   --candidate-id "$candidate_id" \
+  --assembly-target configs/wire_assembly_fixed_20261106.json \
   --execute
 ```
 
-真实动作顺序为：打开夹爪 → 预抓取 → 到夹持位 → 闭合 → 抬升。程序重新请求规划并检查真实反馈，不直接回放上一步报告；不会自动使能机械臂。失败后不盲目重试、不放宽容差或绕过阻断。控制器成功和`executed`报告仍需结合现场观察确认是否实际夹住、抬起线材。
+本手册两条命令已同步固定装配转移参数 `--assembly-target configs/wire_assembly_fixed_20261106.json`，见[装配转移测试](ASSEMBLY_FIXED_TARGET.md#接入抓取流程操作者测试路径)。该选项到达装配点后保持夹持，不自动松爪。
+
+当前真实动作顺序为：打开夹爪 → 预抓取 → 到夹持位（确认闭合轴与线材切线85–90°） → 闭合 → 抬升 → 装配直线入口 → 沿 base_link -Y 直线30 mm到固定装配点。装配入口及终点需同时满足2 mm / 0.01 rad / 各轴0.005 rad容差并持续0.5秒，到达后保持夹持，不自动松爪。程序重新请求规划并检查真实反馈，不直接回放上一步报告；不会自动使能机械臂。失败后不盲目重试、不放宽容差或绕过阻断。控制器成功和`executed`报告仍需结合现场观察确认是否实际夹住、抬起线材。
 
 失败报告中的 `physical_motion_performed=null` 表示已尝试动作但运动证据不足，不能当作“未动”。查看 `motion_commands_attempted`、`motion_evidence`及现场反馈，先确认真实状态再处理。
 

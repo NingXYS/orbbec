@@ -190,7 +190,7 @@ def test_partial_failure_report_is_unknown_not_no_motion(tmp_path, tamper):
     source.write_text('{}')
     args = SimpleNamespace(report=None, recognition=source, candidate_id='A', base_frame='base_link',
                            tip_link='tcp_link', expected_parent_frame='link6', binding=tmp_path/'binding',
-                           allow_nominal_urdf_tool=False, execute=True, joints=['joint1'])
+                           allow_nominal_urdf_tool=False, execute=True, joints=['joint1'], assembly_target=None)
     saved = []
     spec = {'execution_allowed': True, 'candidate_id': 'A', 'gripper': {'open_width_m': .1, 'force_n': 1.},
             'stages': [{'name': 'pregrasp'}]}
@@ -209,7 +209,8 @@ def test_partial_failure_report_is_unknown_not_no_motion(tmp_path, tamper):
              'rclpy': SimpleNamespace(init=lambda: None, shutdown=lambda: None), 'WireMoveGroup': FakeNode,
              'ROOT': ROOT, 'sys': sys, 'datetime': datetime,
              'write_json_exclusive': lambda path, report: saved.append(deepcopy(report)) or path}
-    exec(compile(ast.Module(body=[main], type_ignores=[]), '<offline main>', 'exec'), scope)
+    sequence = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_motion_sequence')
+    exec(compile(ast.Module(body=[sequence, main], type_ignores=[]), '<offline main>', 'exec'), scope)
     assert scope['main']() == 2
     assert saved[0]['physical_motion_performed'] is None
     assert saved[0]['motion_commands_attempted'] == (['gripper_open'] if tamper else ['gripper_open', 'pregrasp'])
@@ -222,7 +223,7 @@ def test_invalid_execution_source_rejected_before_ros_init(tmp_path):
     source.write_text('{}')
     args = SimpleNamespace(report=None, recognition=source, candidate_id='A', base_frame='base_link',
                            tip_link='tcp_link', expected_parent_frame='link6', binding=None,
-                           allow_nominal_urdf_tool=False, execute=True)
+                           allow_nominal_urdf_tool=False, execute=True, assembly_target=None)
     initialized = []
     scope = {'parser': lambda: SimpleNamespace(parse_args=lambda: args), 'sha256': sha256,
              'load_recognition': lambda path: (path, {}), 'sys': sys,

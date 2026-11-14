@@ -162,6 +162,8 @@ def apply_grasp_policy(result, cfg, boundaries=None, metric_paths=None):
     result.grasp_policy = {
         'anchor': 'terminal_insulation_boundary', 'offset_mm': offset,
         'closing_rule': 'perpendicular_to_local_wire_tangent',
+        'closing_angle_range_deg': [85.0, 90.0],
+        'closing_angle_preferred_deg': 90.0,
         'boundary_confirmation': 'manual_per_snapshot',
         'metric_source': 'aligned_camera_path_m',
         'robot_pose_valid': False, 'tcp_compensation_applied': False,

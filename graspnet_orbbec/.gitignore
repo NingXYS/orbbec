@@ -15,6 +15,8 @@ weights/*.ckpt
 weights/sam2/
 third_party/sam2/
 third_party/sam2_runtime/
+# pip --target 的安装目录，可通过 scripts/install_pyorbbecsdk2.sh 重建。
+third_party/pyorbbecsdk2/
 *.ply
 *.log
 .ipynb_checkpoints/

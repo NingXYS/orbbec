@@ -7,6 +7,7 @@ import math
 from pathlib import Path
 
 import numpy as np
+from arm.grasp_angle import closing_angle_review
 
 from segmentation.path_validation import execution_path_review
 
@@ -189,8 +190,11 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
     from arm.source_validation import execution_source_review
     source_review = execution_source_review(recognition, plan, binding_file,
                                             allow_nominal_urdf_tool=allow_nominal_urdf_tool)
+    angle_review = closing_angle_review(plan)
     execution_blockers = list(dict.fromkeys(execution_blockers+visual_review['rejection_reasons']
                                            +source_review['rejection_reasons']))
+    if source_review['passed'] and not angle_review['passed']:
+        execution_blockers.append('grasp_closing_angle_outside_85_90_or_unavailable')
     if source_review.get('nominal_tool'):
         nominal_tool_authorized = allow_nominal_urdf_tool
         if not allow_nominal_urdf_tool and NOMINAL_TOOL_BLOCKER not in execution_blockers:
@@ -235,6 +239,7 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
         'approach_direction_base': approach.tolist(),
         'pregrasp_clearance_m': along,
         'grasp_center_base_m': base_grasp[:3, 3].tolist(),
+        'grasp_closing_direction_base': base_grasp[:3, 0].tolist(),
         'gripper': {
             'joint_name': 'gripper',
             'open_width_m': 0.1,
@@ -246,6 +251,7 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
         'execution_blockers': execution_blockers,
         'visual_path_review': visual_review,
         'source_review': source_review,
+        'closing_angle_review': angle_review,
         'warnings': warnings,
         'nominal_urdf_tool_execution_authorized': nominal_tool_authorized,
         'readiness_note': (

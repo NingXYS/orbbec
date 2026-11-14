@@ -1,0 +1,272 @@
+{
+  "schema_version": 1,
+  "target_id": "wire_assembly_fixed_20261106_113119",
+  "purpose": "线材夹取成功并抬升后，回到本次示教的固定装配位置及姿态",
+  "status": "integrated_pending_physical_transfer_test",
+  "recorded_at": "2026-11-06T11:31:19.993318+08:00",
+  "robot_model": "piper_x",
+  "reference_frame": "base_link",
+  "joint_names": [
+    "joint1",
+    "joint2",
+    "joint3",
+    "joint4",
+    "joint5",
+    "joint6"
+  ],
+  "joint_positions_rad": [
+    -1.3138838609013312,
+    1.6801062978473016,
+    -1.5374256314967651,
+    1.2975475791026645,
+    0.04773475504204491,
+    0.37964401889380656
+  ],
+  "joint_positions_deg": [
+    -75.28,
+    96.263,
+    -88.08800000000001,
+    74.34400000000001,
+    2.735,
+    21.752
+  ],
+  "flange_goal": {
+    "position_m": [
+      0.09147999999999999,
+      -0.354848,
+      0.299074
+    ],
+    "position_mm": [
+      91.47999999999999,
+      -354.848,
+      299.074
+    ],
+    "quaternion_xyzw": [
+      0.06354603002918205,
+      0.9917711536612002,
+      -0.11054922453661044,
+      0.011434587330391745
+    ],
+    "rpy_rad": [
+      -2.921855700763707,
+      0.036739180754480634,
+      3.017674276698196
+    ],
+    "rpy_deg": [
+      -167.41,
+      2.105,
+      172.9
+    ],
+    "T_base_frame": [
+      [
+        -0.9916623045602279,
+        0.12857440854980423,
+        0.008631059052392255,
+        0.09147999999999999
+      ],
+      [
+        0.1235180695007204,
+        0.9674815420437688,
+        -0.22073230916978714,
+        -0.354848
+      ],
+      [
+        -0.0367309164208172,
+        -0.21782581865031364,
+        -0.9752962383338755,
+        0.299074
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "grasp_tcp_goal": {
+    "position_m": [
+      0.09264519297207295,
+      -0.3846468617379213,
+      0.16740900782492682
+    ],
+    "position_mm": [
+      92.64519297207295,
+      -384.6468617379213,
+      167.40900782492682
+    ],
+    "quaternion_xyzw": [
+      0.06354603002918205,
+      0.9917711536612002,
+      -0.11054922453661044,
+      0.011434587330391745
+    ],
+    "rpy_rad": [
+      -2.921855700763707,
+      0.036739180754480634,
+      3.017674276698196
+    ],
+    "rpy_deg": [
+      -167.41,
+      2.105,
+      172.9
+    ],
+    "T_base_frame": [
+      [
+        -0.9916623045602279,
+        0.12857440854980423,
+        0.008631059052392255,
+        0.09264519297207295
+      ],
+      [
+        0.1235180695007204,
+        0.9674815420437688,
+        -0.22073230916978714,
+        -0.3846468617379213
+      ],
+      [
+        -0.0367309164208172,
+        -0.21782581865031364,
+        -0.9752962383338755,
+        0.16740900782492682
+      ],
+      [
+        0.0,
+        0.0,
+        0.0,
+        1.0
+      ]
+    ]
+  },
+  "orientation_convention": "R = Rz(yaw) @ Ry(pitch) @ Rx(roll); quaternion order xyzw",
+  "tool": {
+    "file": "configs/wire_tool_piper_x_135mm.json",
+    "sha256": "520a614932aadd904efc01137d5bd7c989fde592e8393c6b5ad46825b91b6484",
+    "T_flange_grasp": [
+      [
+        1,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        1,
+        0.135
+      ],
+      [
+        0,
+        0,
+        0,
+        1
+      ]
+    ],
+    "limitations": [
+      "该文件使用操作者指定的135mm夹持中心，不是独立计量验收的TCP",
+      "若夹指安装或夹持面改变，必须重新测量"
+    ]
+  },
+  "planning_contract": {
+    "preferred_goal": "recorded_joint_configuration_to_preserve_arm_posture",
+    "pose_goal_reference": "flange_goal when tcp_link coincides with link6; grasp_tcp_goal uses the 135 mm offset",
+    "gripper_policy": "保持夹持，不把采样时开口作为装配动作指令",
+    "automatic_postgrasp_transfer_integrated": true,
+    "execution_allowed": false,
+    "blockers": [
+      "operator_must_exit_teaching_mode",
+      "postgrasp_loaded_transfer_not_validated",
+      "physical_obstacles_and_camera_mount_not_in_planning_scene"
+    ],
+    "joint_limit_violations": [],
+    "limits_source": "/home/ning/orbbec/agilex_official_ws/src/agx_arm_ros/src/agx_arm_description/agx_arm_urdf/piper_x/urdf/piper_x_description.urdf",
+    "operator_path_test_enabled_by_explicit_cli": true,
+    "execution_allowed_note": "此字段保留为完整路径验收状态；操作者可显式使用 --assembly-target 与 --execute 测试，入口仍检查视觉、目标与真实反馈。"
+  },
+  "observation": {
+    "source": "passive_socketcan_official_sdk_decoder",
+    "application_frames_sent": 0,
+    "sdk_session_connected": false,
+    "initial_report": "output/wire_grasp/assembly_state_20261106_reteach_01.json",
+    "verification_report": "output/wire_grasp/assembly_state_20261106_reteach_02.json",
+    "initial_sha256": "4bff4c0f09eaf8c122a157863d42c2ab0195a41cdfeb73706b0319fee29b6645",
+    "verification_sha256": "3458e910fd1c8e2253e1b80c1f7242691b6b4b3a139437823c7700f513083d1d",
+    "two_snapshots_identical": true,
+    "continuous_stability_validated": false,
+    "complete_pose_counts": [
+      600,
+      600
+    ],
+    "ctrl_mode": 2,
+    "teach_status": 2,
+    "gripper_width_m": 0.0021999999999999997
+  },
+  "supersedes": "configs/wire_assembly_fixed_20261106_superseded_103514.json",
+  "final_approach": {
+    "frame_id": "base_link",
+    "axis": "y",
+    "direction": -1,
+    "distance_m": 0.03,
+    "max_speed_m_s": 0.01
+  },
+  "integration_validation": {
+    "status": "planned_only",
+    "report": "output/wire_grasp/assembly_reteach_y30_20261106_01/report.json",
+    "target_id": "wire_assembly_fixed_20261106_113119",
+    "stages": [
+      "pregrasp",
+      "grasp",
+      "lift",
+      "assembly_entry",
+      "assembly"
+    ],
+    "physical_motion_performed": false,
+    "cartesian_check": {
+      "axis": "base_link/y",
+      "direction": -1,
+      "travel_m": 0.03000013749212871,
+      "max_lateral_error_m": 1.7324815417471385e-06,
+      "max_orientation_error_rad": 4.583166986474345e-07,
+      "fk_samples": 16,
+      "max_speed_m_s": 0.01
+    },
+    "runtime_goal_check": {
+      "runtime_model_sha256": "0c158db7d08f7bac0eaf9ff3ae6735989ef41fe2dc8c706ade4ffa7cddeb8e32",
+      "position_error_m": 0.0002635776647773735,
+      "orientation_error_rad": 3.6042345164714944e-05,
+      "T_base_flange_model": [
+        [
+          -0.9916647083833363,
+          0.12855407107319128,
+          0.008657768621372935,
+          0.09148248446577552
+        ],
+        [
+          0.1234919425428478,
+          0.9674820591174534,
+          -0.22074466111968902,
+          -0.35478786092311454
+        ],
+        [
+          -0.03675386066777639,
+          -0.217835525331295,
+          -0.975293205979439,
+          0.2993306131411886
+        ],
+        [
+          0.0,
+          0.0,
+          0.0,
+          1.0
+        ]
+      ]
+    },
+    "source_scope": "recognition replay for planning regression only; not a new capture"
+  }
+}
