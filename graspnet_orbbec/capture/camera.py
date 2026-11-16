@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+from tempfile import TemporaryDirectory
 from pathlib import Path
 from typing import Iterator, Optional
 
@@ -562,7 +563,8 @@ class FileCamera:
         return None
 
     def get_intrinsics(self) -> Intrinsics:
-        return self.read().color_intrinsics
+        index = self._index % len(self._items) if self.loop else min(self._index, len(self._items) - 1)
+        return load_rgbd_dir(self._items[index]).color_intrinsics
 
     def read(self) -> RGBDFrame:
         if self._index >= len(self._items):
@@ -600,11 +602,13 @@ def load_rgbd_dir(data_dir: str | Path) -> RGBDFrame:
     depth = depth.astype(np.uint16)
 
     factor = 1000.0
+    saved = {}
     fx = fy = cx = cy = None
     json_path = data_dir / "intrinsics.json"
     mat_path = data_dir / "meta.mat"
     if json_path.exists():
         meta = json.loads(json_path.read_text(encoding="utf-8"))
+        saved = meta
         k = meta.get("color_intrinsics", meta)
         fx, fy, cx, cy = k["fx"], k["fy"], k["cx"], k["cy"]
         factor = float(meta.get("factor_depth", meta.get("depth_scale_inv", 1000.0)))
@@ -623,22 +627,31 @@ def load_rgbd_dir(data_dir: str | Path) -> RGBDFrame:
         cx, cy = w / 2.0, h / 2.0
 
     h, w = color_bgr.shape[:2]
-    if depth.shape != (h, w):
-        depth = cv2.resize(depth, (w, h), interpolation=cv2.INTER_NEAREST)
-
-    k = Intrinsics(fx=float(fx), fy=float(fy), cx=float(cx), cy=float(cy), width=w, height=h)
+    # 旧版同尺寸的对齐样例允许省略标记；尺寸不同不能靠缩放得到配准。
+    aligned = saved.get("aligned", depth.shape == (h, w))
+    if type(aligned) is not bool or (aligned and depth.shape != (h, w)):
+        raise ValueError("深度对齐标记与图像尺寸不一致")
+    if not np.isfinite(factor) or factor <= 0:
+        raise ValueError("深度比例必须为有限正数")
+    color_params = dict(saved.get("color_intrinsics", saved))
+    color_params.update(fx=fx, fy=fy, cx=cx, cy=cy, width=w, height=h)
+    k = Intrinsics.from_dict(color_params)
+    depth_k = Intrinsics.from_dict(saved["depth_intrinsics"]) if "depth_intrinsics" in saved else k
+    if not aligned and "depth_intrinsics" not in saved:
+        raise ValueError("未对齐的深度回放缺少独立深度内参")
     depth_m = depth.astype(np.float32) / float(factor)
     return RGBDFrame(
         color_bgr=color_bgr,
         depth_u16=depth,
         depth_m=depth_m,
         color_intrinsics=k,
-        depth_intrinsics=k,
-        aligned=True,
-        timestamp_ns=0,
+        depth_intrinsics=depth_k,
+        aligned=aligned,
+        depth_to_color=Extrinsics.from_dict(saved["depth_to_color"]) if saved.get("depth_to_color") else None,
+        timestamp_ns=saved.get("timestamp_ns", 0),
         depth_scale=1000.0 / float(factor),
         backend="file",
-        extra={"path": str(data_dir)},
+        extra={"path": str(data_dir), "factor_depth": factor},
     )
 
 
@@ -646,12 +659,10 @@ def save_rgbd_dir(frame: RGBDFrame, out_dir: str | Path) -> Path:
     """把一帧存成可回放目录。"""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_dir / "color.png"), frame.color_bgr)
-    cv2.imwrite(str(out_dir / "depth.png"), frame.depth_u16)
     meta = {
         "color_intrinsics": frame.color_intrinsics.to_dict(),
         "depth_intrinsics": frame.depth_intrinsics.to_dict(),
-        "factor_depth": 1000.0,
+        "factor_depth": frame.extra.get("factor_depth", 1000.0) if frame.backend == "file" else 1000.0,
         "aligned": frame.aligned,
         "backend": frame.backend,
         "timestamp_ns": frame.timestamp_ns,
@@ -662,7 +673,15 @@ def save_rgbd_dir(frame: RGBDFrame, out_dir: str | Path) -> Path:
         meta["source_depth_scale_mm"] = frame.depth_scale
     if frame.depth_to_color is not None:
         meta["depth_to_color"] = frame.depth_to_color.to_dict()
-    (out_dir / "intrinsics.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+    # 两张图都编码成功后才发布，写图失败时保留原来的完整帧。
+    with TemporaryDirectory(dir=out_dir) as temporary:
+        staging = Path(temporary)
+        for name, data in (("color.png", frame.color_bgr), ("depth.png", frame.depth_u16)):
+            if not cv2.imwrite(str(staging / name), data):
+                raise OSError(f"RGB-D图像保存失败：{name}")
+        (staging / "intrinsics.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        for name in ("color.png", "depth.png", "intrinsics.json"):
+            (staging / name).replace(out_dir / name)
     return out_dir
 
 

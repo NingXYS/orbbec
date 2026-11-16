@@ -46,6 +46,9 @@ python scripts/run_live_gui.py --no-target
 
 取流自检：`python capture/run_capture.py --preview`。单帧完整推理：`python scripts/run_pipeline.py --live --once`。使用原 Gemini 配置：`python scripts/run_live_gui.py --config configs/gemini336l.yaml`。详细约束见 [DC1 接入说明](docs/DABAI_DC1.md)。
 
+
+离线 RGB-D 回放保留深度图原始尺寸、内参、对齐标记及深度比例。未对齐帧可读取，彩色点云与基于彩色框的三维定位要求已对齐帧。`FileCamera.get_intrinsics()` 可在读帧前调用。重新保存回放数据时沿用原文件的深度单位；写图失败会报错。
+
 ## YOLO 权重效果检验
 
 根目录 `best.pt` 为单类别 YOLOv8x 实例分割权重。直接运行：

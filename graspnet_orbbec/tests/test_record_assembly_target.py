@@ -18,6 +18,10 @@ spec.loader.exec_module(recorder)
 
 def setup_record(tmp_path):
     template = json.loads((ROOT/'configs/wire_assembly_fixed_20261106.json').read_text())
+    model = tmp_path/recorder.LIMITS_SOURCE
+    model.parent.mkdir(parents=True, exist_ok=True)
+    model.write_bytes((ROOT/recorder.LIMITS_SOURCE).read_bytes())
+    template['planning_contract']['limits_source'] = '/previous-user/absent.urdf'
     tool = tmp_path/template['tool']['file']
     tool.parent.mkdir(parents=True)
     tool.write_bytes((ROOT/template['tool']['file']).read_bytes())
@@ -45,6 +49,7 @@ def test_main_records_consistent_target_backs_up_and_expires_old_checks(tmp_path
     assert 'latest_pose_comparison' not in result
     assert result['planning_contract']['execution_allowed'] is False
     assert 'operator_must_exit_teaching_mode' in result['planning_contract']['blockers']
+    assert result['planning_contract']['limits_source'] == str(recorder.LIMITS_SOURCE)
     assert result['joint_positions_rad']==sample['joint_angles_rad']
     assert np.allclose(result['grasp_tcp_goal']['T_base_frame'],template['grasp_tcp_goal']['T_base_frame'])
 

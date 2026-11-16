@@ -20,7 +20,8 @@ if str(ROOT) not in sys.path:
 from arm.moveit_wire_adapter import build_motion_spec, load_recognition, write_json_exclusive
 from arm.handeye_bridge import sha256
 from arm.feedback_safety import MotionAudit, update_joints, require_joints
-from arm.assembly_target import load_assembly_target, validate_runtime_assembly, validate_y_approach
+from arm.assembly_target import (flange_lever_bounds, limit_flange_speed, load_assembly_target,
+                                 validate_runtime_assembly, validate_y_approach)
 from arm.grasp_angle import closing_angle_deg, CLOSING_MIN_DEG
 from arm.moveit_wire_adapter import transform_to_pose
 
@@ -44,6 +45,7 @@ from moveit_msgs.srv import GetPositionFK, GetCartesianPath, GetStateValidity
 from rcl_interfaces.srv import GetParameters
 from rclpy.action import ActionClient
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from rclpy.time import Time
 from sensor_msgs.msg import JointState
@@ -247,10 +249,20 @@ class WireMoveGroup(Node):
         self._tf_buffer = Buffer()
         self._tf_listener = TransformListener(self._tf_buffer, self)
 
+    def _sample_time(self, message):
+        # 驱动的 header 使用采样时间；转到单调时钟后，重发旧包不会延长有效期。
+        stamp = Time.from_msg(message.header.stamp).nanoseconds
+        age = (self.get_clock().now().nanoseconds - stamp) * 1e-9
+        if stamp <= 0 or age < 0:
+            return -math.inf
+        return time.monotonic() - age
+
     def _joint_callback(self, message):
         before = dict(self._joint_positions)
-        update_joints(self._joint_positions, self._joint_seen_at, message.name, message.position, time.monotonic())
-        self._motion_audit.observe(before, self._joint_positions)
+        update_joints(self._joint_positions, self._joint_seen_at, message.name, message.position, self._sample_time(message))
+        fresh = {name: self._joint_positions[name] for name in message.name
+                 if name in self._joint_positions and time.monotonic() - self._joint_seen_at[name] <= 2.5}
+        self._motion_audit.observe(before, fresh)
 
     def _require_joint_feedback(self, names=None):
         require_joints(self._joint_positions, self._joint_seen_at,
@@ -258,7 +270,7 @@ class WireMoveGroup(Node):
 
     def _tcp_callback(self, message):
         self._tcp_pose = message.pose
-        self._tcp_seen_at = time.monotonic()
+        self._tcp_seen_at = self._sample_time(message)
 
     def _diagnostic_callback(self, name, message):
         self._diagnostics[name] = [
@@ -270,7 +282,7 @@ class WireMoveGroup(Node):
             }
             for status in message.status
         ]
-        self._diagnostic_seen_at[name] = time.monotonic()
+        self._diagnostic_seen_at[name] = self._sample_time(message)
 
     def _spin_for(self, seconds, predicate=None):
         deadline = time.monotonic() + seconds
@@ -282,14 +294,16 @@ class WireMoveGroup(Node):
 
     def _wait_joint_feedback(self):
         def complete():
-            return all(joint in self._joint_positions for joint in self.args.joints)
+            now = time.monotonic()
+            return all(joint in self._joint_positions and now - self._joint_seen_at[joint] <= 2.5
+                       for joint in self.args.joints)
 
         started = time.monotonic()
         initial_wait = min(2.0, self.args.feedback_timeout)
         if self._spin_for(initial_wait, complete):
             return True
-        self.destroy_subscription(self._joint_sub)
-        self._joint_sub = self.create_subscription(
+        # 保留实机 volatile 订阅，让慢启动的驱动在剩余等待时间内仍能匹配。
+        self._joint_cached_sub = self.create_subscription(
             JointState,
             resolved(self.args.namespace, self.args.joint_state_topic),
             self._joint_callback,
@@ -377,12 +391,16 @@ class WireMoveGroup(Node):
                     for status in statuses if status['level'] != ok_level
                 ]
                 raise ValueError(f'{name}报告非OK状态：' + '; '.join(details))
+        expected = {'arm_status': ['arm'], 'motor_status': DEFAULT_JOINTS, 'gripper_status': ['gripper']}
+        for topic, names in expected.items():
+            if sorted(s['name'] for s in self._diagnostics[topic]) != sorted(names):
+                raise ValueError(f'{topic}诊断条目缺失、重复或名称错误')
         arm = self._diagnostics['arm_status'][0]['values']
-        if arm.get('teach_status') == '1':
-            raise ValueError('机械臂仍处于拖动/示教记录状态')
-        if arm.get('ctrl_mode') not in (None, '0', '1'):
+        if arm.get('teach_status') not in ('0', '2', '6'):
+            raise ValueError('示教状态缺失或仍在记录/回放')
+        if arm.get('ctrl_mode') not in ('0', '1'):
             raise ValueError(f"当前控制模式不适合MoveIt执行：ctrl_mode={arm.get('ctrl_mode')}")
-        if arm.get('arm_status') not in (None, '0'):
+        if arm.get('arm_status') != '0':
             raise ValueError(f"机械臂状态非待机：arm_status={arm.get('arm_status')}")
         for status in self._diagnostics['motor_status']:
             if status['values'].get('enabled') != 'true':
@@ -441,7 +459,12 @@ class WireMoveGroup(Node):
 
         goal = MoveGroup.Goal()
         goal.request.group_name = args.group
-        goal.request.pipeline_id = 'ompl'
+        if stage.get('name') == 'grasp':
+            # LIN 从预抓取末态沿笛卡尔直线到夹持点，禁止退回自由关节路径。
+            goal.request.pipeline_id = 'pilz_industrial_motion_planner'
+            goal.request.planner_id = 'LIN'
+        else:
+            goal.request.pipeline_id = 'ompl'
         goal.request.goal_constraints = [constraints]
         goal.request.num_planning_attempts = args.planning_attempts
         goal.request.allowed_planning_time = args.planning_time
@@ -452,9 +475,14 @@ class WireMoveGroup(Node):
         if start_positions is not None:
             goal.request.start_state.joint_state.name = list(args.joints)
             goal.request.start_state.joint_state.position = [float(value) for value in start_positions]
-            if plan_only and 'planning_gripper_width_m' in stage:
+        if plan_only:
+            if stage.get('name') in ('pregrasp', 'grasp'):
+                width = self.spec['gripper']['open_width_m']
+            else:
+                width = stage.get('planning_gripper_width_m')
+            if width is not None:
                 goal.request.start_state.joint_state.name.append('gripper')
-                goal.request.start_state.joint_state.position.append(stage['planning_gripper_width_m'])
+                goal.request.start_state.joint_state.position.append(width)
         goal.planning_options.plan_only = plan_only
         goal.planning_options.look_around = False
         goal.planning_options.replan = False
@@ -467,17 +495,15 @@ class WireMoveGroup(Node):
             return self.plan_or_execute_cartesian(stage, plan_only, start_positions)
         started = time.monotonic()
         goal = self._goal(stage, plan_only, start_positions, start_is_diff)
+        if not plan_only:
+            self._require_safe_diagnostics()
         send_future = self._move.send_goal_async(goal)
         if not self._spin_for(10.0, send_future.done):
             raise RuntimeError(f'{name}发送超时')
         handle = send_future.result()
         if handle is None or not handle.accepted:
             raise RuntimeError(f'{name}目标未被MoveGroup接受')
-        result_future = handle.get_result_async()
-        if not self._spin_for(self.args.goal_timeout, result_future.done):
-            handle.cancel_goal_async()
-            raise RuntimeError(f'{name}在{self.args.goal_timeout:.0f}s内未返回')
-        wrapped = result_future.result()
+        wrapped = self._action_result(handle, self.args.goal_timeout, name, monitor=not plan_only)
         if (wrapped.status != GoalStatus.STATUS_SUCCEEDED
                 or wrapped.result.error_code.val != MoveItErrorCodes.SUCCESS):
             raise RuntimeError(
@@ -501,6 +527,21 @@ class WireMoveGroup(Node):
             'trajectory_points': len(trajectory.points),
             'final_joint_positions': [float(value) for value in final_positions],
         }
+
+    def _action_result(self, handle, timeout, name, *, monitor):
+        future = handle.get_result_async()
+        def finished():
+            if monitor:
+                self._require_safe_diagnostics()
+            return future.done()
+        try:
+            if not self._spin_for(timeout, finished):
+                raise RuntimeError(f'{name}在{timeout:g}s内未返回')
+            return future.result()
+        except (Exception, KeyboardInterrupt):
+            cancellation = handle.cancel_goal_async()
+            self._spin_for(2.0, cancellation.done)
+            raise
 
     def _call_service(self, kind, service, request):
         client = self.create_client(kind, namespaced(self.args.namespace, service))
@@ -533,6 +574,7 @@ class WireMoveGroup(Node):
         urdf = self._call_service(GetParameters, 'move_group/get_parameters', request).values[0].string_value
         actual = self._assembly_fk(stage['joint_names'], stage['joint_positions_rad'])
         result = validate_runtime_assembly(stage, urdf, actual)
+        result['flange_lever_bounds_m'] = dict(zip(stage['joint_names'], flange_lever_bounds(urdf, stage['joint_names'])))
         result['T_base_flange_model'] = actual.tolist()
         return result
 
@@ -564,18 +606,11 @@ class WireMoveGroup(Node):
         joints = trajectory.joint_trajectory
         transforms = [self._assembly_fk(joints.joint_names, point.positions) for point in joints.points]
         checked = validate_y_approach(transforms, approach['direction'], approach['distance_m'])
-        times = np.array([p.time_from_start.sec+p.time_from_start.nanosec*1e-9 for p in joints.points])
-        distances = np.linalg.norm(np.diff(np.array(transforms)[:, :3, 3], axis=0), axis=1)
-        max_speed = float(np.max(distances/np.diff(times)))
-        slowdown = max(1.0, max_speed/approach.get('max_speed_m_s', 0.01))
-        for point, seconds in zip(joints.points, times*slowdown):
-            ns = round(float(seconds)*1e9)
-            point.time_from_start.sec, point.time_from_start.nanosec = divmod(ns, 10**9)
-            point.velocities = [v/slowdown for v in point.velocities]
-            point.accelerations = [v/slowdown**2 for v in point.accelerations]
+        radii = [runtime['flange_lever_bounds_m'][name] for name in joints.joint_names]
+        speed_bound = limit_flange_speed(joints, radii, float(approach.get('max_speed_m_s', 0.01)))
         self._assembly_cartesian = trajectory
         stage['kind'] = 'cartesian_y'
-        stage['cartesian_check'] = dict(checked, max_speed_m_s=max_speed/slowdown,
+        stage['cartesian_check'] = dict(checked, max_speed_m_s=speed_bound, speed_check="spline_upper_bound",
                                          trajectory=message_to_ordereddict(trajectory))
         entry = copy.deepcopy(stage)
         entry.update(name='assembly_entry', kind='joint', final_approach=None,
@@ -612,6 +647,7 @@ class WireMoveGroup(Node):
                 raise ValueError('装配直线执行前入口状态发生变化')
             if not self._execute_trajectory.wait_for_server(timeout_sec=5.0):
                 raise RuntimeError('官方ExecuteTrajectory未就绪')
+            self._require_safe_diagnostics()
             goal = ExecuteTrajectory.Goal()
             goal.trajectory = trajectory
             future = self._execute_trajectory.send_goal_async(goal)
@@ -620,11 +656,7 @@ class WireMoveGroup(Node):
             handle = future.result()
             if handle is None or not handle.accepted:
                 raise RuntimeError('装配直线执行被拒绝')
-            result = handle.get_result_async()
-            if not self._spin_for(self.args.goal_timeout, result.done):
-                handle.cancel_goal_async()
-                raise RuntimeError('装配直线执行超时')
-            wrapped = result.result()
+            wrapped = self._action_result(handle, self.args.goal_timeout, '装配直线', monitor=True)
             if wrapped.status != GoalStatus.STATUS_SUCCEEDED or wrapped.result.error_code.val != MoveItErrorCodes.SUCCESS:
                 raise RuntimeError('装配直线执行失败')
         return {'name': 'assembly', 'ok': True, 'plan_only': plan_only,
@@ -746,8 +778,9 @@ class WireMoveGroup(Node):
     def command_gripper(self, width, effort, *, expect_open=False):
         self._require_joint_feedback(list(self.args.joints)+['gripper'])
         preclose = self._joint_positions.get('gripper')
-        self.call_gate(True)
+        self._require_safe_diagnostics()
         try:
+            self.call_gate(True)
             if not self._gripper_action.wait_for_server(timeout_sec=self.args.feedback_timeout):
                 raise RuntimeError(
                     '官方夹爪FollowJointTrajectory Action未就绪：'
@@ -762,17 +795,14 @@ class WireMoveGroup(Node):
             trajectory.points = [point]
             goal = FollowJointTrajectory.Goal()
             goal.trajectory = trajectory
+            self._require_safe_diagnostics()
             send_future = self._gripper_action.send_goal_async(goal)
             if not self._spin_for(10.0, send_future.done):
                 raise RuntimeError('夹爪轨迹发送超时')
             handle = send_future.result()
             if handle is None or not handle.accepted:
                 raise RuntimeError('夹爪轨迹未被官方控制器接受')
-            result_future = handle.get_result_async()
-            if not self._spin_for(15.0, result_future.done):
-                handle.cancel_goal_async()
-                raise RuntimeError('夹爪轨迹执行超时')
-            wrapped = result_future.result()
+            wrapped = self._action_result(handle, 15.0, '夹爪轨迹', monitor=True)
             if (wrapped.status != GoalStatus.STATUS_SUCCEEDED
                     or wrapped.result.error_code != FollowJointTrajectory.Result.SUCCESSFUL):
                 raise RuntimeError(
@@ -804,10 +834,7 @@ class WireMoveGroup(Node):
                 'width_after_m': self._joint_positions.get('gripper'),
             }
         finally:
-            try:
-                self.call_gate(False)
-            except Exception as exc:
-                self.get_logger().error(f'关闭控制门控失败：{exc}')
+            self.call_gate(False)
 
 
 def run_motion_sequence(node, args, spec, report, recheck_source):
@@ -912,7 +939,8 @@ def main():
     except (OSError, ValueError) as exc:
         print(f'视觉抓取适配失败：{exc}', file=sys.stderr)
         return 2
-    rclpy.init()
+    # Ctrl+C 先交给 Python 保存报告和关闭门控，最后再释放 ROS 上下文。
+    rclpy.init(signal_handler_options=SignalHandlerOptions.SIGTERM)
     node = WireMoveGroup(args, spec)
     def recheck_source():
         if assembly is not None:
@@ -951,11 +979,13 @@ def main():
                 spec['stages'].insert(-1, entry)
             print('已启用固定装配转移：抬升后到示教六轴目标，保持夹爪闭合；现场路径由操作者测试。')
         run_motion_sequence(node, args, spec, report, recheck_source)
-        report['completed_at'] = datetime.now().astimezone().isoformat()
+    except KeyboardInterrupt:
+        report['status'] = 'interrupted'
+        report['error'] = '操作者中断'
+        exit_code = 130
     except Exception as exc:
         report['status'] = 'failed'
         report['error'] = str(exc)
-        report['completed_at'] = datetime.now().astimezone().isoformat()
         print(f'视觉抓取适配失败：{exc}', file=sys.stderr)
         exit_code = 2
     else:
@@ -966,16 +996,18 @@ def main():
         )
     finally:
         report.update(node._motion_audit.report())
-        node.destroy_node()
-        rclpy.shutdown()
-
-    report_path = args.report or (
-        ROOT / 'output/wire_grasp' /
-        f"moveit_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{spec['candidate_id']}" /
-        'report.json'
-    )
-    written = write_json_exclusive(report_path, report)
-    print(f'报告：{written}')
+        report['completed_at'] = datetime.now().astimezone().isoformat()
+        report_path = args.report or (
+            ROOT / 'output/wire_grasp' /
+            f"moveit_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}_{spec['candidate_id']}" /
+            'report.json'
+        )
+        try:
+            written = write_json_exclusive(report_path, report)
+            print(f'报告：{written}')
+        finally:
+            node.destroy_node()
+            rclpy.try_shutdown()
     return exit_code
 
 

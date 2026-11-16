@@ -133,6 +133,8 @@ def build_motion_spec(recognition, candidate_id=None, *, frame_id='base_link',
                       tip_link='tcp_link', expected_parent_frame='link6',
                       allow_nominal_urdf_tool=False, binding_file=None):
     """输出预抓取、夹持和抬升三个MoveIt位姿，并保留执行阻断原因。"""
+    if frame_id != 'base_link' or expected_parent_frame != 'link6':
+        raise ValueError('视觉目标固定为 base_link 下的 link6 法兰位姿')
     plan = select_grasp_plan(recognition, candidate_id)
     if plan.get('status') != TARGET_STATUS:
         raise ValueError(

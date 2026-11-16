@@ -6,7 +6,7 @@
 
 1. 官方夹爪开到预抓取宽度；
 2. MoveIt 到预抓取位；
-3. MoveIt 沿夹持接近轴下降到抓取位；
+3. Pilz LIN 从到达的预抓取位直线下降到抓取位，LIN 规划失败即中止；
 4. 通过官方门控和 `gripper_controller/follow_joint_trajectory` 闭合夹爪；
 5. MoveIt 抬升回预抓取位。
 
@@ -45,7 +45,7 @@
 
 ## 坐标与工具合同
 
-- 视觉输出是 `base_link -> link6/flange` 位姿。
+- 视觉输出固定为 `base_link -> link6/flange` 位姿。入口校验基座和法兰坐标系，并用快照支撑面核对候选接近方向。
 - 官方当前 launch 的 `tcp_offset` 为零，因此 MoveIt 规划末端 `tcp_link` 与 `link6` 重合。
 - 程序启动规划前检查 `link6 -> tcp_link` 的位置和旋转误差；若启动了非零 `tcp_offset`，会拒绝对视觉法兰目标直接规划。
 - 工具补偿只消费视觉结果中的一次补偿，不在适配层再次加 141.5/142.5 mm。
@@ -65,6 +65,10 @@
 - 每个 MoveIt 阶段成功后，`feedback/tcp_pose` 确实到达目标容差；
 - 夹爪开口反馈确实达到开/闭目标；
 - 夹爪轨迹通过官方 `gripper_controller/follow_joint_trajectory` 执行；期间只通过 `/piper_x/control_enable` 门控短暂开放。
+
+仅规划时，预抓取和下降按 100 mm 开口检查；抬升及装配按闭合开口检查。LIN 从预抓取实际或规划末态出发，末态的位置误差会影响下降起点。
+
+执行时按消息头采样时间检查反馈。每次发送动作前及等待控制器结果时检查机械臂、夹爪和六轴电机诊断；故障会中止流程并对已接受的活动目标请求取消。夹爪门控关闭失败会进入失败报告。Ctrl+C 中断后报告记录 `status=interrupted` 和已尝试的阶段，进程返回 130。取消结果和实际停机状态需结合控制器反馈确认。
 
 规划目标容差默认仍为 `3 mm / 0.05 rad`；执行后的 TCP 实际到位验收使用独立的 `--arrival-position-tolerance-m 0.01` 和 `--arrival-orientation-tolerance-rad 0.10`。这样不会因为控制器终点存在少量姿态残差，把已经完成的夹持和抬升误报成整次抓取失败。
 

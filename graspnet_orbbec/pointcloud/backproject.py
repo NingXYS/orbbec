@@ -38,6 +38,8 @@ def backproject(depth_m: np.ndarray, K: Intrinsics, organized: bool = True) -> n
 
 
 def frame_to_cloud(frame: RGBDFrame, min_depth: float = 0.05, max_depth: float = 2.0) -> OrganizedCloud:
+    if not frame.aligned:
+        raise ValueError("需要对齐到彩色相机坐标系的深度帧")
     xyz = backproject(frame.depth_m, frame.color_intrinsics, organized=True)
     rgb = frame.color_rgb.astype(np.float32) / 255.0
     valid = (frame.depth_m > min_depth) & (frame.depth_m < max_depth) & np.isfinite(frame.depth_m)

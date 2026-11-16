@@ -109,6 +109,10 @@ def execution_source_review(recognition, plan, binding_file=None, *, allow_nomin
                             ('T_flange_grasp', tool_data['T_flange_grasp'])]:
             if not np.allclose(coordinates[key], actual, atol=1e-9, rtol=0):
                 raise ValueError('真实来源与坐标合同不一致：'+key)
+        normal = np.asarray(bridge.plane['normal_camera'], float)
+        candidate_normal = np.asarray(plan['support_plane_normal'], float)
+        if candidate_normal.shape != (3,) or not np.allclose(candidate_normal, normal, atol=1e-8, rtol=0):
+            raise ValueError('候选接近轴与实际支撑面法向不一致')
         expected = grasp_transforms(plan, transform, tool_data['T_flange_grasp'])
         for key in ('T_base_grasp', 'T_base_flange_grasp', 'T_base_flange_pregrasp'):
             if not np.allclose(expected[key], plan[key], atol=1e-8, rtol=0):

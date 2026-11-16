@@ -182,8 +182,8 @@ def test_motion_attempt_and_observation_are_separate():
     assert audit.report()['physical_motion_performed'] is True
 
 
-@pytest.mark.parametrize('tamper', [False, True])
-def test_partial_failure_report_is_unknown_not_no_motion(tmp_path, tamper):
+@pytest.mark.parametrize('failure', ['stage', 'tamper', 'interrupt'])
+def test_partial_failure_report_is_unknown_not_no_motion(tmp_path, failure):
     tree = ast.parse((ROOT/'scripts/run_moveit_wire_grasp.py').read_text())
     main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'main')
     source = tmp_path/'recognition.json'
@@ -199,21 +199,26 @@ def test_partial_failure_report_is_unknown_not_no_motion(tmp_path, tamper):
         def wait_ready(self, *args): pass
         def _require_parent_tip_identity(self): return {}
         def command_gripper(self, *args, **kwargs):
-            if tamper:
+            if failure == 'tamper':
                 source.write_text('changed during mock session')
             return {'mock_command_returned': True}
-        def plan_or_execute(self, *args): raise RuntimeError('mock failure after gripper request')
+        def plan_or_execute(self, *args):
+            if failure == 'interrupt':
+                raise KeyboardInterrupt
+            raise RuntimeError('mock failure after gripper request')
         def destroy_node(self): pass
     scope = {'parser': lambda: SimpleNamespace(parse_args=lambda: args), 'sha256': sha256,
              'load_recognition': lambda path: (path, {}), 'build_motion_spec': lambda *a, **k: spec,
-             'rclpy': SimpleNamespace(init=lambda: None, shutdown=lambda: None), 'WireMoveGroup': FakeNode,
+             'SignalHandlerOptions': SimpleNamespace(SIGTERM=2),
+             'rclpy': SimpleNamespace(init=lambda **kw: None, try_shutdown=lambda: None), 'WireMoveGroup': FakeNode,
              'ROOT': ROOT, 'sys': sys, 'datetime': datetime,
              'write_json_exclusive': lambda path, report: saved.append(deepcopy(report)) or path}
     sequence = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'run_motion_sequence')
     exec(compile(ast.Module(body=[sequence, main], type_ignores=[]), '<offline main>', 'exec'), scope)
-    assert scope['main']() == 2
+    assert scope['main']() == (130 if failure == 'interrupt' else 2)
+    assert saved[0]['status'] == ('interrupted' if failure == 'interrupt' else 'failed')
     assert saved[0]['physical_motion_performed'] is None
-    assert saved[0]['motion_commands_attempted'] == (['gripper_open'] if tamper else ['gripper_open', 'pregrasp'])
+    assert saved[0]['motion_commands_attempted'] == (['gripper_open'] if failure == 'tamper' else ['gripper_open', 'pregrasp'])
 
 
 def test_invalid_execution_source_rejected_before_ros_init(tmp_path):
@@ -239,7 +244,7 @@ def test_real_callback_only_updates_received_joint_times():
     method = next(n for n in cls.body if isinstance(n, ast.FunctionDef) and n.name == '_joint_callback')
     scope = {'update_joints': update_joints, 'time': SimpleNamespace(monotonic=lambda: 100.)}
     exec(compile(ast.Module(body=[method], type_ignores=[]), '<offline callback>', 'exec'), scope)
-    node = SimpleNamespace(_joint_positions={'joint1': 0.}, _joint_seen_at={'joint1': 90.}, _motion_audit=MotionAudit())
+    node = SimpleNamespace(_sample_time=lambda message: 100., _joint_positions={'joint1': 0.}, _joint_seen_at={'joint1': 90.}, _motion_audit=MotionAudit())
     scope['_joint_callback'](node, SimpleNamespace(name=['gripper'], position=[.05]))
     assert node._joint_seen_at == {'joint1': 90., 'gripper': 100.}
 
@@ -291,3 +296,17 @@ def test_malformed_manifest_saves_manual_review_report(tmp_path, content):
     assert report['status'] == 'manual_confirmation_required'
     assert report['rejection_reasons'] == ['sequence_validation_failed']
     assert (tmp_path/'analysis/analysis.json').exists()
+
+
+def test_reversed_candidate_normal_cannot_authorize_motion(bound_target):
+    from arm.wire_geometry import grasp_transforms
+    data, candidate, binding, _ = bound_target
+    plan = get_plan(data, candidate)
+    plan['support_plane_normal'] = (-np.array(plan['support_plane_normal'])).tolist()
+    geometry = plan['coordinate_verification']
+    plan.update(grasp_transforms(plan, geometry['T_base_rgb'], geometry['T_flange_grasp']))
+    motion = build_motion_spec(data, candidate, binding_file=binding)
+    assert not motion['execution_allowed']
+    assert '法向' in motion['source_review']['detail']
+    with pytest.raises(ValueError, match='base_link'):
+        build_motion_spec(data, candidate, binding_file=binding, frame_id='link1')

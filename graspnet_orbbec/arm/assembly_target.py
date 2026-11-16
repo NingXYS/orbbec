@@ -99,3 +99,68 @@ def validate_y_approach(transforms, direction, distance):
     return {'axis': 'base_link/y', 'direction': direction, 'travel_m': travel,
             'max_lateral_error_m': lateral, 'max_orientation_error_rad': max(angles),
             'fk_samples': len(matrices)}
+
+
+def flange_lever_bounds(urdf, joint_names):
+    """由运行模型给出各转轴到 link6 的最大力臂，单位米。"""
+    model = ET.fromstring(urdf)
+    parents = {joint.find('child').get('link'): joint for joint in model.findall('joint')}
+    link, distance, radii = 'link6', 0., {}
+    visited = set()
+    while link != 'base_link':
+        if link in visited or link not in parents:
+            raise ValueError('运行模型缺少 base_link 到 link6 的有效运动链')
+        visited.add(link)
+        joint = parents[link]
+        if joint.get('type') != 'fixed':
+            if joint.get('type') not in ('revolute', 'continuous'):
+                raise ValueError('装配限速需要旋转关节模型')
+            radii[joint.get('name')] = distance
+        origin = joint.find('origin')
+        xyz = [float(v) for v in origin.get('xyz', '0 0 0').split()] if origin is not None else [0.] * 3
+        if len(xyz) != 3 or not np.isfinite(xyz).all():
+            raise ValueError('运行模型关节平移无效')
+        distance += np.linalg.norm(xyz)
+        link = joint.find('parent').get('link')
+    if set(radii) != set(joint_names):
+        raise ValueError('装配轨迹关节与运行模型运动链不一致')
+    return np.array([radii[name] for name in joint_names])
+
+
+def spline_flange_speed_bound(points, times, radii):
+    """按 JTC 的线性、三次或五次插值计算整个轨迹的法兰线速度上界。"""
+    peak = 0.
+    for left, right, dt in zip(points, points[1:], np.diff(times)):
+        if not np.isfinite(dt) or dt <= 0:
+            raise ValueError('限速需要严格递增的轨迹时间')
+        q0, q1 = np.array(left.positions), np.array(right.positions)
+        control = [q0, q1]
+        if len(left.velocities) and len(right.velocities):
+            v0, v1 = np.array(left.velocities), np.array(right.velocities)
+            if len(left.accelerations) and len(right.accelerations):
+                a0, a1 = np.array(left.accelerations), np.array(right.accelerations)
+                control = [q0, q0+v0*dt/5, q0+2*v0*dt/5+a0*dt**2/20,
+                           q1-2*v1*dt/5+a1*dt**2/20, q1-v1*dt/5, q1]
+            else:
+                control = [q0, q0+v0*dt/3, q1-v1*dt/3, q1]
+        # 贝塞尔导数位于控制点凸包内，再用各关节力臂约束法兰线速度。
+        velocities = (len(control)-1) * np.diff(control, axis=0) / dt
+        peak = max(peak, float(np.max(np.abs(velocities) @ radii)))
+    return peak
+
+
+def limit_flange_speed(joints, radii, limit):
+    times_ns = np.array([p.time_from_start.sec * 10**9 + p.time_from_start.nanosec
+                         for p in joints.points], dtype=np.int64)
+    bound = spline_flange_speed_bound(joints.points, times_ns * 1e-9, radii)
+    # 留出纳秒取整余量，并按发送给控制器的最终时间、导数复核。
+    slowdown = max(1., bound / limit * 1.000001)
+    scaled_ns = np.rint(times_ns * slowdown).astype(np.int64)
+    for point, ns in zip(joints.points, scaled_ns):
+        point.time_from_start.sec, point.time_from_start.nanosec = divmod(int(ns), 10**9)
+        point.velocities = [v/slowdown for v in point.velocities]
+        point.accelerations = [a/slowdown**2 for a in point.accelerations]
+    actual_bound = spline_flange_speed_bound(joints.points, scaled_ns * 1e-9, radii)
+    if not math.isfinite(actual_bound) or actual_bound > limit:
+        raise ValueError('装配末段插值速度超过指定上限')
+    return actual_bound

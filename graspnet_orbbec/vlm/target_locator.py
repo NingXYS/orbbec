@@ -187,6 +187,8 @@ def locate_target(
     target: str = "",
 ) -> LocateResult:
     """对一帧对齐 RGB-D 做 bbox→质心。"""
+    if not frame.aligned:
+        raise ValueError("需要对齐到彩色相机坐标系的深度帧")
     if frame.color_bgr.shape[:2] != frame.depth_m.shape:
         raise ValueError(
             f"RGB {frame.color_bgr.shape[:2][::-1]} 与 depth {frame.depth_m.shape[::-1]} 尺寸不同，需要对齐帧"

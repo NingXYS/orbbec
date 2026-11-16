@@ -23,6 +23,10 @@ from arm.moveit_wire_adapter import matrix_to_quaternion, rigid_transform
 from arm.wire_geometry import flange_transform
 
 
+LIMITS_SOURCE = Path('../agilex_official_ws/src/agx_arm_ros/src/agx_arm_description/'
+                     'agx_arm_urdf/piper_x/urdf/piper_x_description.urdf')
+
+
 def build_record(template, samples, *, root, report_dir):
     """目标更新必须成套重算；不保留旧目标的规划或退出示教结论。"""
     matrices, joints = [], []
@@ -44,7 +48,8 @@ def build_record(template, samples, *, root, report_dir):
     current = samples[-1]
     if template['joint_names'] != JOINT_NAMES or template['reference_frame'] != 'base_link':
         raise ValueError('模板不是官方六轴base_link合同')
-    model = ET.parse(template['planning_contract']['limits_source']).getroot()
+    # 旧记录的绝对路径属于原采集机器，限位以本次工作区的官方模型为准。
+    model = ET.parse(root / LIMITS_SOURCE).getroot()
     limits = {j.attrib['name']: j.find('limit') for j in model.findall('joint')}
     for name, value in zip(JOINT_NAMES, joints[-1]):
         limit = limits.get(name)
@@ -82,6 +87,7 @@ def build_record(template, samples, *, root, report_dir):
                              'ctrl_mode': current['arm_status']['ctrl_mode'],
                              'teach_status': current['arm_status']['teach_status']}
     contract = result['planning_contract']
+    contract['limits_source'] = str(LIMITS_SOURCE)
     contract['execution_allowed'] = False
     contract['joint_limit_violations'] = []
     contract['blockers'] = ['postgrasp_loaded_transfer_not_validated', 'physical_obstacles_and_camera_mount_not_in_planning_scene']
